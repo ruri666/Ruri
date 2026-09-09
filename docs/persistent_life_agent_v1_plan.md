@@ -48,7 +48,8 @@ Rules:
 - `text_tree.py` owns serialization only. Each memory type has exactly one Markdown file.
 - Summary services can create derived nodes but cannot create historical facts.
 - `persistent_agent.py` composes services; it does not become a second source of truth.
-- No module imports a vector database, embedding index, web UI, or provider SDK.
+- No module imports a vector database, embedding index, or provider SDK; the
+  optional local `webui.py` adapter uses only the standard library.
 
 ## Filesystem contract
 

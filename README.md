@@ -55,6 +55,24 @@ python examples/demo.py --root var/demo_agent
 
 Demo 会模拟：起床 → 写第二章大纲 → Heartbeat → 身体不适随机事件 → 中断 → 休息 → replan → 恢复写作 → 用户消息，并在 `var/demo_agent/memory/` 生成全部文件。
 
+## 运行 Web UI
+
+启动一个只监听本机的标准库 HTTP 服务：
+
+```powershell
+$env:PYTHONPATH = "src"
+python -m artificial_life.webui --root var/web_agent --port 8765
+```
+
+然后打开 `http://127.0.0.1:8765/`。页面提供对话、状态、Activity、Goals、最近
+Timeline 和显式 Heartbeat 按钮。发送消息会写入 User Raw Dialogue，并通过当前
+`LLMProvider` 生成一条 Agent Dialogue；只有点击 Heartbeat（或宿主调用
+`agent.heartbeat()`）才会推进生活时间。默认 provider 是无网络的
+`MockLLMProvider`，因此回复会显示“已记录”式确定性确认。
+
+API 也可以被其他前端使用：`GET /api/state`、`GET /api/dialogue`、
+`GET /api/timeline`、`POST /api/message` 和 `POST /api/heartbeat`。
+
 ## 运行测试
 
 ```powershell
@@ -66,7 +84,7 @@ python -m pytest -q
 ## 当前限制
 
 - 默认使用标准库和 `MockLLMProvider`，没有真实 OpenAI/provider adapter。
-- 没有 Web UI、多用户、分布式运行、数据库或高并发 writer。
+- Web UI 目前是仅监听本机的标准库服务；没有认证、多用户、分布式运行、数据库或高并发 writer。
 - Summary 当前由 Mock provider 生成确定性文本；真实语义总结需后续 adapter。
 - User Core 只在显式 `merge_user_core` 时更新，不会未经批准从单条对话自动写入长期事实。
 - Random event 默认概率为 0，必须显式配置 seed 和 probability。
@@ -80,4 +98,3 @@ python -m pytest -q
 4. 保持文本树为 canonical memory；任何搜索索引都只能是可删除的 derived cache。
 
 架构细节见 [docs/artificial_life_architecture.md](docs/artificial_life_architecture.md) 和 [docs/persistent_life_agent_v1_plan.md](docs/persistent_life_agent_v1_plan.md)。
-

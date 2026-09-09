@@ -3,7 +3,7 @@
 > Status: V1 Persistent Life Agent implemented with deterministic/mock provider  
 > Updated: 2026-08-18  
 > Default persona: 轻小说作家  
-> Scope: architecture baseline plus the implemented V1 lifecycle, file-backed memory, retrieval, and contexts. Production LLM adapters, UI, distributed execution, and high-concurrency writers remain out of scope.
+> Scope: architecture baseline plus the implemented V1 lifecycle, file-backed memory, retrieval, contexts, and local Web UI adapter. Production LLM adapters, distributed execution, and high-concurrency writers remain out of scope.
 
 ## 1. Purpose and scope
 
@@ -40,7 +40,7 @@ This is a logical loop, not a requirement to call an LLM on every heartbeat. Mos
 
 ### 1.2 Non-goals for this design phase
 
-- Implementing production business behavior, prompts, UI, or a daemon.
+- Implementing production business behavior, prompts, a production UI, or a daemon.
 - Choosing a hosted LLM vendor permanently.
 - Modeling a physically complete world or human cognition.
 - Using vector search as the canonical memory store.
@@ -57,7 +57,7 @@ reuse. The following Phase 1 implementation is now present under `src/` and
 |---|---|---|
 | Project policy | `agents.md` defines the persona and core invariants | Reuse as binding project policy |
 | Application source | `src/artificial_life/` contains the deterministic runtime | Extend through ports/adapters in later phases |
-| Entrypoint / runtime | Python API: `LifeRuntime`, `heartbeat`, and `run_due` | Add CLI/daemon adapter later |
+| Entrypoint / runtime | Python API: `LifeRuntime`, `heartbeat`, and `run_due`; local HTTP UI in `webui.py` | Add a production daemon/deployment adapter later |
 | LLM integration | Provider-neutral port plus deterministic `MockLLMProvider`; no network adapter | Add an optional production provider adapter |
 | Persistence | Versioned JSON plan/state/timer files, checksummed dated JSONL L0 timeline, Raw Dialogue, Markdown memory trees | Keep indexes/cache derived if added later |
 | Tests | Phase 1 and V1 lifecycle/memory/context/retrieval tests under `tests/` | Add contract/property/fault suites in later phases |
@@ -184,7 +184,8 @@ class CommandQueue(Protocol):
 - System and fake clocks.
 - Provider-specific LLM adapters behind one gateway; recording and fake adapters for tests.
 - CLI commands for `init`, `tick`, `run`, `message`, `inspect`, `replay`, `summarize`, and `doctor`.
-- Later daemon scheduler and UI/API adapters. They enqueue commands; they do not bypass services.
+- The local `webui.py` adapter and later daemon/API adapters enqueue explicit
+  commands; they do not bypass services.
 - Optional lexical/vector indexes. They are derived caches only.
 
 ## 5. Dependency relationships
@@ -1006,6 +1007,7 @@ implemented modules:
 | Provider boundary | `llm.py`: `LLMProvider` plus deterministic `MockLLMProvider` |
 | Random hook | `random_events.py`: seed/hash-derived optional event checks, disabled by default |
 | Composition | `persistent_agent.py`: Heartbeat, memory sync, planning, context and demo facade; heartbeat sync is provider-free |
+| Local Web UI | `webui.py`: stdlib HTTP server, explicit message/Heartbeat commands, state/timeline views | Add auth, TLS, multi-user and production deployment later |
 
 The compact Phase 1 `state/state.json` projection is shared by the schedule
 runtime and the richer Activity tree.  Activity-tree transitions append normal
@@ -1015,6 +1017,6 @@ the deterministic schedule driver, so a scheduled block cannot start beneath
 an externally managed Activity.
 
 V1 leaves production provider adapters, full LLM semantic planning, vector
-search, Web UI, distributed execution, and high-concurrency writers out of
-scope. `README.md` and `docs/persistent_life_agent_v1_plan.md` are the user-facing
+search, authenticated/multi-user UI deployment, distributed execution, and
+high-concurrency writers out of scope. `README.md` and `docs/persistent_life_agent_v1_plan.md` are the user-facing
 runbook and detailed contract.
