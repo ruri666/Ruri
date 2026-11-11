@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import StrEnum
+import math
 from typing import Any
 
 
@@ -272,11 +273,13 @@ class State:
     logical_time: datetime
     mode: StateMode = StateMode.RESERVED_FREE
     active_activity_id: str | None = None
-    location: str = "home"
+    location: str = "digital_workspace"
     emotion: str = "neutral"
     energy: float = 1.0
     health: float = 1.0
     fatigue: float = 0.0
+    mood_valence: float = 0.0
+    work_streak: int = 0
     last_heartbeat_at: datetime | None = None
     last_heartbeat_id: str | None = None
     consumed_schedule_ids: set[str] = field(default_factory=set)
@@ -286,10 +289,12 @@ class State:
     def __post_init__(self) -> None:
         self.logical_time = as_utc(self.logical_time)
         self.mode = StateMode(self.mode)
+        if not math.isfinite(self.mood_valence) or type(self.work_streak) is not int or self.work_streak < 0:
+            raise ValueError("Invalid mood_valence/work_streak")
         for field_name in ("energy", "health", "fatigue"):
             value = float(getattr(self, field_name))
-            if not 0.0 <= value <= 1.0:
-                raise ValueError(f"{field_name} must be between 0 and 1")
+            if not math.isfinite(value):
+                raise ValueError(f"{field_name} must be finite")
             setattr(self, field_name, value)
         if self.last_heartbeat_at is not None:
             self.last_heartbeat_at = as_utc(self.last_heartbeat_at)
@@ -308,6 +313,8 @@ class State:
             "energy": self.energy,
             "health": self.health,
             "fatigue": self.fatigue,
+            "mood_valence": self.mood_valence,
+            "work_streak": self.work_streak,
             "last_heartbeat_at": iso(self.last_heartbeat_at),
             "last_heartbeat_id": self.last_heartbeat_id,
             "consumed_schedule_ids": sorted(self.consumed_schedule_ids),
@@ -321,11 +328,13 @@ class State:
             logical_time=data["logical_time"],
             mode=StateMode(data.get("mode", StateMode.RESERVED_FREE.value)),
             active_activity_id=data.get("active_activity_id"),
-            location=str(data.get("location", "home")),
+            location=str(data.get("location", "digital_workspace")),
             emotion=str(data.get("emotion", "neutral")),
             energy=float(data.get("energy", 1.0)),
             health=float(data.get("health", 1.0)),
             fatigue=float(data.get("fatigue", 0.0)),
+            mood_valence=float(data.get("mood_valence", 0.0)),
+            work_streak=int(data.get("work_streak", 0)),
             last_heartbeat_at=data.get("last_heartbeat_at"),
             last_heartbeat_id=data.get("last_heartbeat_id"),
             consumed_schedule_ids=set(data.get("consumed_schedule_ids", [])),

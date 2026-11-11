@@ -21,29 +21,41 @@ class RawPointer:
     stream: str
     start_record: str
     end_record: str
+    activity_id: str | None = None
+    conversation_id: str | None = None
 
     def to_dict(self) -> dict[str, str]:
-        return {
+        value = {
             "stream": self.stream,
             "start_record": self.start_record,
             "end_record": self.end_record,
         }
+        if self.activity_id is not None:
+            value["activity_id"] = self.activity_id
+        if self.conversation_id is not None:
+            value["conversation_id"] = self.conversation_id
+        return value
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "RawPointer":
-        return cls(str(value["stream"]), str(value["start_record"]), str(value["end_record"]))
+        return cls(str(value["stream"]), str(value["start_record"]), str(value["end_record"]),
+                   value.get("activity_id"), value.get("conversation_id"))
 
     def as_text(self) -> str:
-        return f"{self.stream};start_record={self.start_record};end_record={self.end_record}"
+        value = f"{self.stream};start_record={self.start_record};end_record={self.end_record}"
+        scope = {key: val for key, val in self.to_dict().items() if key.endswith("_id")}
+        return value + (";scope=" + json.dumps(scope, ensure_ascii=False) if scope else "")
 
     @classmethod
     def from_text(cls, value: str) -> "RawPointer | None":
         if not value.strip():
             return None
-        parts = [part.strip() for part in value.split(";")]
-        if len(parts) != 3 or "=" not in parts[1] or "=" not in parts[2]:
+        parts = [part.strip() for part in value.split(";", 3)]
+        if len(parts) not in {3, 4} or "=" not in parts[1] or "=" not in parts[2]:
             raise ValueError(f"invalid raw pointer: {value}")
-        return cls(parts[0], parts[1].split("=", 1)[1], parts[2].split("=", 1)[1])
+        scope = json.loads(parts[3].removeprefix("scope=")) if len(parts) == 4 else {}
+        return cls(parts[0], parts[1].split("=", 1)[1], parts[2].split("=", 1)[1],
+                   scope.get("activity_id"), scope.get("conversation_id"))
 
 
 @dataclass(frozen=True)
@@ -104,10 +116,24 @@ class RawDialogueStore:
         self.stream = stream
         self.path = Path(root) / f"{stream}_raw_dialogue.jsonl"
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._cache: list[RawRecord] | None = None
+        self._cached_mtime: int | None = None
+        self._cached_size: int | None = None
 
     def records(self) -> list[RawRecord]:
         if not self.path.exists():
+            self._cache = []
             return []
+        try:
+            stat = self.path.stat()
+            if (
+                self._cache is not None
+                and self._cached_mtime == stat.st_mtime_ns
+                and self._cached_size == stat.st_size
+            ):
+                return list(self._cache)
+        except OSError:
+            pass
         result: list[RawRecord] = []
         with self.path.open("r", encoding="utf-8") as handle:
             for line_number, line in enumerate(handle, 1):
@@ -120,7 +146,15 @@ class RawDialogueStore:
                 if record.stream != self.stream:
                     raise ValueError(f"raw stream mismatch at line {line_number}")
                 result.append(record)
-        return result
+        self._cache = result
+        try:
+            stat = self.path.stat()
+            self._cached_mtime = stat.st_mtime_ns
+            self._cached_size = stat.st_size
+        except OSError:
+            self._cached_mtime = None
+            self._cached_size = None
+        return list(result)
 
     def append(
         self,
@@ -134,7 +168,8 @@ class RawDialogueStore:
         timeline_seq: int | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> RawRecord:
-        record_id = f"{'ar' if self.stream == 'agent' else 'ur'}_{len(self.records()) + 1:012d}"
+        records = self.records()
+        record_id = f"{'ar' if self.stream == 'agent' else 'ur'}_{len(records) + 1:012d}"
         record = RawRecord(
             record_id=record_id,
             stream=self.stream,
@@ -151,6 +186,14 @@ class RawDialogueStore:
             handle.write(json.dumps(record.to_dict(), ensure_ascii=False, sort_keys=True) + "\n")
             handle.flush()
             os.fsync(handle.fileno())
+        if self._cache is not None:
+            self._cache.append(record)
+            try:
+                stat = self.path.stat()
+                self._cached_mtime = stat.st_mtime_ns
+                self._cached_size = stat.st_size
+            except OSError:
+                self._cache = None
         return record
 
     def append_many(self, records: Iterable[dict[str, Any]]) -> list[RawRecord]:
@@ -186,7 +229,9 @@ class RawDialogueStore:
     def resolve(self, pointer: RawPointer) -> list[RawRecord]:
         if pointer.stream != self.stream:
             raise ValueError(f"pointer stream {pointer.stream} does not match {self.stream}")
-        return self.query(start_record=pointer.start_record, end_record=pointer.end_record)
+        return [record for record in self.query(start_record=pointer.start_record, end_record=pointer.end_record)
+                if (pointer.activity_id is None or record.activity_id == pointer.activity_id)
+                and (pointer.conversation_id is None or record.conversation_id == pointer.conversation_id)]
 
 
 class RawMemory:

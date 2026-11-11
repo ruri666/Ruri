@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Iterable
 
@@ -29,10 +29,12 @@ class MemoryRouter:
     def route(self, query: str) -> tuple[str, ...]:
         text = query.lower()
         conversation_signal = any(word in text for word in ("聊", "说", "对话", "记得我", "我们讨论", "告诉我当时"))
-        activity_signal = any(word in text for word in ("做过", "旅行", "旅游", "写小说", "活动", "住过", "住宿", "项目"))
+        creative_activity = any(word in text for word in ("撰写", "创作", "写作", "写小说", "正文", "场景", "设定稿", "短篇", "章节", "对白", "台词"))
+        activity_signal = creative_activity or any(word in text for word in ("做过", "旅行", "旅游", "写小说", "活动", "住过", "住宿", "项目"))
         temporal_signal = bool(re.search(r"20\d{2}|今天|昨天|最近|上次|上周|本周|那天|某天|哪天|过去|几月|日期|星期", text))
         strong_conversation = any(word in text for word in ("我们聊", "聊天", "对话", "说过什么", "我说", "和你抱怨"))
-        if strong_conversation and not any(word in text for word in ("旅行", "旅游", "实际住宿", "住宿体验")):
+        explicit_chat_history = any(word in text for word in ("我们聊", "我们讨论", "聊天记录", "对话记录", "说过什么", "我说过", "和你抱怨"))
+        if strong_conversation and not any(word in text for word in ("旅行", "旅游", "实际住宿", "住宿体验")) and (not creative_activity or explicit_chat_history):
             return ("conversation",)
         selected: list[str] = []
         if conversation_signal:
@@ -60,12 +62,29 @@ class FileTreeRetriever:
         memory_type: str | None = None,
         limit: int = 5,
         raw_fallback: bool = True,
+        conversation_id: str | None = None,
     ) -> RetrievalResult:
+        raw_ref = re.fullmatch(r"raw:(agent|user):([A-Za-z0-9_-]+)", query.strip())
+        if raw_ref:
+            stream, record_id = raw_ref.groups()
+            records = [r for r in self.raw.store(stream).query(record_id=record_id)
+                       if conversation_id is None or (r.conversation_id == conversation_id and r.kind == "dialogue")]
+            return RetrievalResult(query, ("conversation",) if conversation_id is not None else ("mixed",),
+                                   raw_records=tuple(records),
+                                   source_refs=tuple(f"raw:{r.stream}:{r.record_id}" for r in records),
+                                   raw_fallback=bool(records))
         selected = (memory_type,) if memory_type in MEMORY_TYPES or memory_type == "mixed" else MemoryRouter().route(query)
         types = list(MEMORY_TYPE_ORDER) if selected == ("mixed",) else list(selected)
+        if conversation_id is not None:
+            types = ["conversation"]
         nodes: list[tuple[float, TreeNode, str]] = []
         for tree_type in types:
             tree = self._load_tree(tree_type)
+            if conversation_id is not None:
+                # Shared period nodes contain other conversations. Only
+                # isolated episode summaries are eligible for User retrieval.
+                tree = TextTree("conversation", tree.title, [replace(node, parent_id=None)
+                    for node in tree.nodes.values() if node.metadata.get("conversation_id") == conversation_id])
             # Retrieval is deliberately hierarchical.  We first score coarse
             # roots, propagate evidence from matching descendants to those
             # roots, then expand only the winning branches toward fine event
@@ -79,6 +98,10 @@ class FileTreeRetriever:
         fallback_used = False
         for score, node, tree_type in chosen:
             records = self._resolve_node_raw(node)
+            if conversation_id is not None:
+                records = [r for r in records if r.conversation_id == conversation_id and r.kind == "dialogue"]
+            elif tree_type == "activity":
+                records = [r for r in records if r.activity_id == node.node_id]
             need_raw = raw_fallback and (
                 not node.summary and not node.live_summary and not node.final_summary
                 or score <= 1
@@ -88,7 +111,7 @@ class FileTreeRetriever:
                 raw_records.extend(records)
                 fallback_used = fallback_used or bool(records)
         if raw_fallback and not chosen:
-            raw_records.extend(self._raw_search(query))
+            raw_records.extend(self._raw_search(query, conversation_id=conversation_id))
             fallback_used = bool(raw_records)
         unique_raw = {record.record_id: record for record in raw_records}
         refs = [f"node:{node.node_id}" for _, node, _ in chosen] + [f"raw:{record.stream}:{record.record_id}" for record in unique_raw.values()]
@@ -179,10 +202,13 @@ class FileTreeRetriever:
                 records.extend(self.raw.store(value["stream"]).resolve(RawPointer.from_dict(value)))
         return records
 
-    def _raw_search(self, query: str) -> list[RawRecord]:
+    def _raw_search(self, query: str, *, conversation_id: str | None = None) -> list[RawRecord]:
         scored: list[tuple[float, RawRecord]] = []
         for record in self.raw.agent.records() + self.raw.user.records():
-            score = self._text_score(query, record.text)
+            if conversation_id is not None and (record.conversation_id != conversation_id or record.kind != "dialogue"):
+                continue
+            reference = f"raw:{record.stream}:{record.record_id}"
+            score = 1000.0 if query.strip() == reference else self._text_score(query, record.text)
             if score > 0:
                 scored.append((score, record))
         scored.sort(key=lambda item: (-item[0], item[1].recorded_at))
@@ -190,8 +216,18 @@ class FileTreeRetriever:
 
     @staticmethod
     def _score(query: str, node: TreeNode) -> float:
-        text = " ".join([node.title, node.summary, node.live_summary, node.final_summary, json_metadata(node.metadata)])
-        return FileTreeRetriever._text_score(query, text) + (0.5 if node.final_summary else 0.0)
+        if query.strip() in {node.node_id, f"node:{node.node_id}", f"activity:{node.node_id}",
+                             f"temporal:{node.node_id}", f"conversation:{node.node_id}"}:
+            return 1000.0
+        # Rank the same summary that callers actually receive. A stale live
+        # field must not select a node whose preferred final summary is unrelated
+        # and thereby suppress the genuine raw fallback.
+        summary = node.final_summary or node.live_summary or node.summary
+        text = " ".join([node.title, summary, json_metadata(node.metadata)])
+        relevance = FileTreeRetriever._text_score(query, text)
+        # Finalization may rank relevant evidence higher, but cannot make an
+        # unrelated memory eligible or suppress the raw fallback.
+        return relevance + (0.5 if relevance > 0 and node.final_summary else 0.0)
 
     @staticmethod
     def _text_score(query: str, text: str) -> float:

@@ -1,0 +1,6 @@
+{
+  "name": "artificial-life",
+  "version": "0.4.0",
+  "description": "Portable memory and autonomous lifecycle management using the existing agent's native execution environment",
+  "homepage": "http://127.0.0.1:8771"
+}

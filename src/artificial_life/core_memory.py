@@ -10,8 +10,8 @@ from .storage import atomic_write_text
 
 
 DEFAULT_CORE = {
-    "Identity": "轻小说作家人造生命 Agent",
-    "Persona": "轻小说作家",
+    "Identity": "",
+    "Persona": "",
     "Stable Personality": "",
     "Long-term Preferences": "",
     "Long-term Goals": "",
@@ -71,4 +71,3 @@ class CoreMemoryStore:
         sections[section] = (sections.get(section, "") + addition).strip()
         self.write(sections)
         return sections
-

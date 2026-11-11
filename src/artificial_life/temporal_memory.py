@@ -36,11 +36,15 @@ class TemporalMemory:
         moment = as_utc(moment)
         day = moment.date()
         iso_calendar = day.isocalendar()
+        month_id = f"month:{day.year:04d}-{day.month:02d}"
+        week_id = f"week:{iso_calendar.year:04d}-W{iso_calendar.week:02d}"
+        if week_id in self.tree.nodes and self.tree.get(week_id).parent_id != month_id:
+            week_id += f"@{day.year:04d}-{day.month:02d}"
         specs = [
             (f"year:{day.year:04d}", str(day.year), None, "year"),
             (f"month:{day.year:04d}-{day.month:02d}", f"{day.year:04d}-{day.month:02d}", f"year:{day.year:04d}", "month"),
-            (f"week:{iso_calendar.year:04d}-W{iso_calendar.week:02d}", f"Week {iso_calendar.week}", f"month:{day.year:04d}-{day.month:02d}", "week"),
-            (f"day:{day.isoformat()}", day.isoformat(), f"week:{iso_calendar.year:04d}-W{iso_calendar.week:02d}", "day"),
+            (week_id, f"Week {iso_calendar.week}", month_id, "week"),
+            (f"day:{day.isoformat()}", day.isoformat(), week_id, "day"),
         ]
         for node_id, title, parent_id, scale in specs:
             if node_id not in self.tree.nodes:
@@ -110,7 +114,10 @@ class TemporalMemory:
         current_month = (current_day.year, current_day.month)
         current_year = current_day.year
         finalized: list[str] = []
-        for node in self.tree.nodes.values():
+        # Close leaves before ancestors so the ordinary no-LLM raw sync path
+        # still rolls up week/month/year summaries at period boundaries.
+        order = {"day": 0, "week": 1, "month": 2, "year": 3}
+        for node in sorted(self.tree.nodes.values(), key=lambda item: order.get(item.metadata.get("scale"), 4)):
             if node.status == "final":
                 continue
             if node.node_id.startswith("day:"):
@@ -123,18 +130,21 @@ class TemporalMemory:
             elif node.node_id.startswith("month:"):
                 year, month = (int(part) for part in node.node_id.split(":", 1)[1].split("-"))
                 if (year, month) < current_month:
+                    self._update_parent_live([node])
                     node.status = "final"
                     node.final_summary = node.live_summary or node.summary
                     finalized.append(node.node_id)
             elif node.node_id.startswith("year:"):
                 year = int(node.node_id.split(":", 1)[1])
                 if year < current_year:
+                    self._update_parent_live([node])
                     node.status = "final"
                     node.final_summary = node.live_summary or node.summary
                     finalized.append(node.node_id)
             elif node.node_id.startswith("week:"):
                 match = re.match(r"week:(\d{4})-W(\d{2})", node.node_id)
                 if match and (int(match.group(1)), int(match.group(2))) < (current_iso.year, current_iso.week):
+                    self._update_parent_live([node])
                     node.status = "final"
                     node.final_summary = node.live_summary or node.summary
                     finalized.append(node.node_id)
@@ -169,10 +179,42 @@ class TemporalMemory:
             if snippets:
                 scale = parent.metadata.get("scale", "period")
                 source_text = "；".join(_strip_scale_prefix(snippet) for snippet in snippets)
-                result = self.provider.summarize(source_text[:1200], purpose=f"temporal_{scale}_live", source_refs=[child.node_id for child in children], scale=scale)
-                parent.live_summary = result.text[:1400]
+                summary = self._safe_summary(
+                    source_text[:1200],
+                    purpose=f"temporal_{scale}_live",
+                    source_refs=[{"node_id": child.node_id} for child in children],
+                    scale=scale,
+                )
+                parent.live_summary = summary[:1400]
                 parent.summary = parent.live_summary
                 parent.metadata["summary_source_refs"] = [child.node_id for child in children]
+
+    def _safe_summary(
+        self,
+        source_text: str,
+        *,
+        purpose: str,
+        source_refs: list[dict[str, str]],
+        scale: str,
+    ) -> str:
+        try:
+            result = self.provider.summarize(
+                source_text,
+                purpose=purpose,
+                source_refs=source_refs,
+                scale=scale,
+            )
+            if result.text.strip():
+                return result.text.strip()
+        except Exception:
+            # Temporal memory is derived state; preserve the raw pointers and
+            # use a bounded deterministic projection during provider outages.
+            pass
+        compact = " ".join(source_text.split())
+        if len(compact) > 500:
+            compact = compact[:497] + "..."
+        prefix = {"day": "当日摘要", "week": "本周摘要", "month": "本月摘要", "year": "年度摘要"}.get(scale, "摘要")
+        return f"{prefix}：{compact}" if compact else f"{prefix}：暂无可总结内容"
 
     @staticmethod
     def _append_summary(existing: str, addition: str) -> str:

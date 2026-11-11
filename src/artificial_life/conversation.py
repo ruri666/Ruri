@@ -78,17 +78,21 @@ class ConversationMemory:
                 by_conversation.setdefault(record.conversation_id, []).append(record)
         created: list[TreeNode] = []
         for conversation_id, episode_records in by_conversation.items():
-            episode_records.sort(key=lambda record: record.recorded_at)
+            episode_records.sort(key=lambda record: (record.recorded_at, 0 if record.role == "user" else 1, record.record_id))
             existing = [node for node in self.episodes() if node.metadata.get("conversation_id") == conversation_id]
             last_closed_at = max((node.end_time for node in existing if node.end_time is not None), default=None)
             if last_closed_at is not None:
                 episode_records = [record for record in episode_records if record.recorded_at > last_closed_at]
             if not episode_records:
                 continue
-            last = episode_records[-1]
-            if moment - last.recorded_at < self.idle_timeout:
-                continue
-            created.append(self._create_episode(conversation_id, episode_records))
+            groups: list[list[RawRecord]] = []
+            for record in episode_records:
+                if not groups or record.recorded_at - groups[-1][-1].recorded_at >= self.idle_timeout:
+                    groups.append([])
+                groups[-1].append(record)
+            for group in groups:
+                if moment - group[-1].recorded_at >= self.idle_timeout:
+                    created.append(self._create_episode(conversation_id, group))
         if created:
             self.store.save(self.tree)
         return created
@@ -100,10 +104,14 @@ class ConversationMemory:
         moment = as_utc(moment or self.clock.now())
         day = moment.date()
         iso_week = day.isocalendar()
+        month_id = f"month:{day.year:04d}-{day.month:02d}"
+        week_id = f"week:{iso_week.year:04d}-W{iso_week.week:02d}"
+        if week_id in self.tree.nodes and self.tree.get(week_id).parent_id != month_id:
+            week_id += f"@{day.year:04d}-{day.month:02d}"
         specs = [
             (f"year:{day.year:04d}", str(day.year), None, "year"),
             (f"month:{day.year:04d}-{day.month:02d}", f"{day.year:04d}-{day.month:02d}", f"year:{day.year:04d}", "month"),
-            (f"week:{iso_week.year:04d}-W{iso_week.week:02d}", f"Week {iso_week.week}", f"month:{day.year:04d}-{day.month:02d}", "week"),
+            (week_id, f"Week {iso_week.week}", month_id, "week"),
         ]
         for node_id, title, parent_id, scale in specs:
             if node_id not in self.tree.nodes:
@@ -121,7 +129,12 @@ class ConversationMemory:
         user_records = [record for record in records if record.stream == "user"]
         agent_records = [record for record in records if record.stream == "agent"]
         source_text = "；".join(f"{record.role}: {record.text}" for record in records)
-        result = self.provider.summarize(source_text, purpose="conversation_episode", source_refs=[], scale="event")
+        summary = self._safe_summary(
+            source_text,
+            purpose="conversation_episode",
+            source_refs=[{"record_id": record.record_id, "stream": record.stream} for record in records],
+            scale="event",
+        )
         user_pointer = self._pointer(user_records, "user")
         agent_pointer = self._pointer(agent_records, "agent")
         node = TreeNode(
@@ -129,9 +142,9 @@ class ConversationMemory:
             title=f"Conversation Episode: {conversation_id}",
             parent_id=path[-1].node_id,
             status="final",
-            summary=result.text,
-            live_summary=result.text,
-            final_summary=result.text,
+            summary=summary,
+            live_summary=summary,
+            final_summary=summary,
             raw_pointer=user_pointer or agent_pointer,
             start_time=first.recorded_at,
             end_time=last.recorded_at,
@@ -150,22 +163,48 @@ class ConversationMemory:
 
     def _update_timeline_live(self, path: list[TreeNode]) -> None:
         for parent in reversed(path):
-            children = [child for child in self.tree.children(parent.node_id) if child.metadata.get("kind") == "episode"]
+            children = self.tree.children(parent.node_id)
             snippets = [child.final_summary or child.live_summary or child.summary for child in children]
             snippets = [snippet for snippet in snippets if snippet]
             if snippets:
-                result = self.provider.summarize(
+                summary = self._safe_summary(
                     "；".join(snippets),
                     purpose="conversation_timeline_live",
-                    source_refs=[child.node_id for child in children],
+                    source_refs=[{"node_id": child.node_id} for child in children],
                     scale=parent.metadata.get("scale", "week"),
                 )
-                parent.live_summary = result.text
-                parent.summary = result.text
+                parent.live_summary = summary
+                parent.summary = summary
                 parent.metadata["summary_source_refs"] = [child.node_id for child in children]
+
+    def _safe_summary(
+        self,
+        source_text: str,
+        *,
+        purpose: str,
+        source_refs: list[dict[str, Any]],
+        scale: str,
+    ) -> str:
+        try:
+            result = self.provider.summarize(
+                source_text,
+                purpose=purpose,
+                source_refs=source_refs,
+                scale=scale,
+            )
+            if result.text.strip():
+                return result.text.strip()
+        except Exception:
+            # Episode closure is a memory projection and must not make the
+            # heartbeat fail when the configured LLM is temporarily down.
+            pass
+        compact = " ".join(source_text.split())
+        if len(compact) > 500:
+            compact = compact[:497] + "..."
+        return f"事件摘要：{compact}" if compact else "事件摘要：暂无可总结内容"
 
     @staticmethod
     def _pointer(records: list[RawRecord], stream: str) -> RawPointer | None:
         if not records:
             return None
-        return RawPointer(stream, records[0].record_id, records[-1].record_id)
+        return RawPointer(stream, records[0].record_id, records[-1].record_id, conversation_id=records[0].conversation_id)

@@ -33,23 +33,24 @@ class SummaryService:
 
     def summarize_activity(self, activity_id: str, *, final: bool | None = None) -> str:
         activity = self.activities.get(activity_id)
-        records = self.raw.agent.resolve(activity.raw_pointer) if activity.raw_pointer else []
+        records = [record for record in self.raw.agent.resolve(activity.raw_pointer)
+                   if record.activity_id == activity_id] if activity.raw_pointer else []
         children = [child for child in self.activities.all() if child.parent_activity == activity_id]
         child_snippets = [child.final_summary or child.live_summary or child.summary for child in children]
         source_text = "；".join(record.text for record in records) or "；".join(child_snippets)
         refs = [{"record_id": record.record_id, "stream": record.stream} for record in records]
         refs.extend({"activity_id": child.activity_id} for child in children if child.final_summary or child.live_summary or child.summary)
         source_ids = [record.record_id for record in records] + [child.activity_id for child in children if child.final_summary or child.live_summary or child.summary]
-        result = self.provider.summarize(source_text, purpose="activity_summary", source_refs=refs, scale="event")
+        summary = self._safe_summarize(source_text, purpose="activity_summary", source_refs=refs, scale="event")
         should_finalize = final if final is not None else activity.status in {"completed", "cancelled"}
         if should_finalize:
-            self.activities.update_final_summary(activity_id, result.text, source_refs=source_ids)
+            self.activities.update_final_summary(activity_id, summary, source_refs=source_ids)
             parent_id = activity.parent_activity
             if parent_id:
                 self._update_direct_parent_live(parent_id)
         else:
-            self.activities.update_live_summary(activity_id, result.text, source_refs=source_ids)
-        return result.text
+            self.activities.update_live_summary(activity_id, summary, source_refs=source_ids)
+        return summary
 
     def finalize_activity(self, activity_id: str) -> str:
         return self.summarize_activity(activity_id, final=True)
@@ -62,8 +63,13 @@ class SummaryService:
             # an explicit summary/finalization pass may condense them later.
             self.temporal.record(record, summary_text=record.text, update_parent_summaries=False)
             return
-        result = self.provider.summarize(record.text, purpose="temporal_day_live", source_refs=[{"record_id": record.record_id}], scale="day")
-        self.temporal.update_live(record.recorded_at, result.text, source=pointer)
+        summary = self._safe_summarize(
+            record.text,
+            purpose="temporal_day_live",
+            source_refs=[{"record_id": record.record_id}],
+            scale="day",
+        )
+        self.temporal.update_live(record.recorded_at, summary, source=pointer)
 
     def finalize_day(self, day_id: str, *, at: datetime | None = None) -> str:
         node = self.temporal.finalize_day(day_id, at=at)
@@ -80,9 +86,42 @@ class SummaryService:
         if not snippets:
             return
         source_text = "；".join(snippets)
-        result = self.provider.summarize(source_text, purpose="activity_parent_live", source_refs=[], scale="event")
+        summary = self._safe_summarize(
+            source_text,
+            purpose="activity_parent_live",
+            source_refs=[{"activity_id": child.activity_id} for child in children if child.final_summary or child.live_summary or child.summary],
+            scale="event",
+        )
         self.activities.update_live_summary(
             parent.activity_id,
-            result.text,
+            summary,
             source_refs=[child.activity_id for child in children],
         )
+
+    def _safe_summarize(
+        self,
+        source_text: str,
+        *,
+        purpose: str,
+        source_refs: list[dict[str, Any]],
+        scale: str,
+    ) -> str:
+        try:
+            result = self.provider.summarize(
+                source_text,
+                purpose=purpose,
+                source_refs=source_refs,
+                scale=scale,
+            )
+            if result.text.strip():
+                return result.text.strip()
+        except Exception:
+            # A provider outage must not roll back a committed Activity fact.
+            # The deterministic text is explicitly a degraded summary, not a
+            # new historical claim.
+            pass
+        compact = " ".join(source_text.split())
+        if len(compact) > 500:
+            compact = compact[:497] + "..."
+        prefix = {"event": "事件摘要", "day": "当日摘要", "week": "本周摘要", "month": "本月摘要", "year": "年度摘要"}.get(scale, "摘要")
+        return f"{prefix}：{compact}" if compact else f"{prefix}：暂无可总结内容"

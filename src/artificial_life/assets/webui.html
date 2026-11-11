@@ -1,0 +1,1363 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="icon" href="data:," />
+  <title>__TITLE__</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0b1120;
+      --bg-card: #151f32;
+      --bg-card-hover: #1e2c45;
+      --border: #243550;
+      --border-light: #334a6e;
+      --text: #f1f5f9;
+      --text-muted: #94a3b8;
+      --accent: #f59e0b;
+      --accent-hover: #d97706;
+      --emerald: #10b981;
+      --sky: #0ea5e9;
+      --indigo: #6366f1;
+      --rose: #f43f5e;
+      --user-bubble: #1e3a5f;
+      --agent-bubble: #1e293b;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: radial-gradient(circle at 50% 0%, #172554 0%, #0b1120 70%);
+      color: var(--text);
+      font: 14px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    }
+    header {
+      background: rgba(15, 23, 42, 0.85);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--border);
+      padding: 12px 24px;
+      position: sticky;
+      top: 0;
+      z-index: 50;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+    }
+    .header-left { display: flex; align-items: center; gap: 16px; }
+    .header-title h1 { margin: 0; font-size: 18px; font-weight: 700; color: #fff; letter-spacing: -0.01em; }
+    .header-title .sub { font-size: 11px; color: var(--text-muted); }
+    .persona-bar { display: flex; align-items: center; gap: 8px; background: rgba(30, 41, 59, 0.7); padding: 4px 8px; border-radius: 10px; border: 1px solid var(--border); }
+    .persona-bar select { background: #0f172a; color: #fde68a; border: 1px solid var(--border); padding: 5px 10px; border-radius: 6px; font-weight: 600; font-size: 13px; cursor: pointer; outline: none; }
+    .header-right { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .badge { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; background: #064e3b; color: #a7f3d0; border: 1px solid #059669; }
+    .badge.free { background: #334155; color: #cbd5e1; border-color: #475569; }
+    .badge.pulse::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: #10b981; box-shadow: 0 0 8px #10b981; }
+
+    button {
+      display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+      border: 0; border-radius: 8px; padding: 7px 12px; font-size: 12px; font-weight: 600; cursor: pointer; transition: all 0.15s ease;
+      background: var(--accent); color: #1e1302;
+    }
+    button:hover { background: var(--accent-hover); }
+    button.secondary { background: #334155; color: var(--text); border: 1px solid var(--border); }
+    button.secondary:hover { background: #475569; }
+    a.button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      text-decoration: none;
+      font-size: 12px;
+      font-weight: 500;
+      padding: 6px 12px;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      background: #334155;
+      color: var(--text);
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    a.button:hover { background: #475569; color: #fff; }
+    a.button.secondary { background: #334155; color: var(--text); border: 1px solid var(--border); }
+    a.button.secondary:hover { background: #475569; }
+    button.danger { background: rgba(244, 63, 94, 0.15); color: #fda4af; border: 1px solid #f43f5e; }
+    button.danger:hover { background: #f43f5e; color: #fff; }
+    button:disabled { opacity: 0.5; cursor: wait; }
+
+    select { background: #1e293b; color: var(--text); border: 1px solid var(--border); padding: 6px 10px; border-radius: 8px; font-size: 12px; }
+
+    main.container { max-width: 1440px; margin: 0 auto; padding: 20px; display: flex; flex-direction: column; gap: 24px; }
+
+    /* SECTION 1: 对话界面 (Chat & Persona State) */
+    .section-chat {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 350px;
+      gap: 18px;
+    }
+    .panel {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.3);
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+    .panel-head {
+      padding: 12px 18px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background: rgba(15, 23, 42, 0.4);
+    }
+    .panel-head h2 { margin: 0; font-size: 15px; font-weight: 700; color: #f8fafc; display: flex; align-items: center; gap: 8px; }
+    
+    #messages {
+      height: 480px;
+      overflow-y: auto;
+      padding: 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      background: rgba(11, 17, 32, 0.5);
+    }
+    .message {
+      max-width: 82%;
+      padding: 12px 16px;
+      border-radius: 14px;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-size: 14px;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+    }
+    .message.user {
+      align-self: flex-end;
+      background: linear-gradient(135deg, #0284c7, #0369a1);
+      color: #fff;
+      border-bottom-right-radius: 3px;
+    }
+    .message.agent {
+      align-self: flex-start;
+      background: var(--agent-bubble);
+      border: 1px solid var(--border);
+      color: #e2e8f0;
+      border-bottom-left-radius: 3px;
+    }
+    .message.pending { border: 1px dashed var(--accent); }
+    .message .meta { font-size: 11px; opacity: 0.75; margin-bottom: 4px; display: flex; justify-content: space-between; gap: 8px; }
+    .empty { color: var(--text-muted); text-align: center; margin: auto; font-size: 13px; }
+
+    form.chat-form {
+      border-top: 1px solid var(--border);
+      padding: 12px 16px;
+      display: flex;
+      gap: 10px;
+      background: rgba(15, 23, 42, 0.6);
+      align-items: flex-end;
+    }
+    textarea.chat-input {
+      flex: 1;
+      resize: none;
+      height: 52px;
+      max-height: 150px;
+      padding: 11px 14px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: #0b1120;
+      color: #fff;
+      font: inherit;
+      outline: none;
+      transition: border-color 0.15s ease;
+    }
+    textarea.chat-input:focus { border-color: var(--sky); }
+
+    /* Aside: Persona Live State */
+    .state-stack { padding: 16px; display: flex; flex-direction: column; gap: 14px; }
+    .persona-profile-card {
+      background: rgba(30, 41, 59, 0.5);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 12px;
+    }
+    .persona-profile-card .name { font-weight: 700; color: #fde68a; font-size: 13px; margin-bottom: 4px; }
+    .persona-profile-card .desc { font-size: 12px; color: var(--text-muted); line-height: 1.5; max-height: 80px; overflow-y: auto; }
+    .stat-row { display: flex; justify-content: space-between; align-items: center; font-size: 12px; }
+    .stat-row .label { color: var(--text-muted); }
+    .stat-row .val { font-weight: 600; color: #e2e8f0; }
+
+    .progress-bar-wrap { width: 100%; height: 6px; background: #1e293b; border-radius: 999px; overflow: hidden; margin-top: 4px; }
+    .progress-bar { height: 100%; border-radius: 999px; transition: width 0.3s ease; }
+    .progress-energy { background: linear-gradient(90deg, #10b981, #34d399); }
+    .progress-fatigue { background: linear-gradient(90deg, #f59e0b, #ef4444); }
+
+    .timeline-ticker { max-height: 160px; overflow-y: auto; font-family: ui-monospace, monospace; font-size: 11px; display: flex; flex-direction: column; gap: 6px; }
+    .timeline-ticker-item { padding: 4px 6px; border-left: 2px solid var(--sky); background: rgba(15, 23, 42, 0.4); border-radius: 0 4px 4px 0; color: #94a3b8; }
+
+    /* SECTION 2: 产出结果 · 按日统计 */
+    .section-works { width: 100%; }
+    .works-toolbar { display: flex; align-items: center; gap: 12px; }
+    .works-container { padding: 16px; display: flex; flex-direction: column; gap: 16px; max-height: 600px; overflow-y: auto; }
+    
+    .day-group {
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: rgba(15, 23, 42, 0.3);
+      overflow: hidden;
+    }
+    .day-header {
+      padding: 10px 16px;
+      background: rgba(30, 41, 59, 0.6);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      cursor: pointer;
+      user-select: none;
+    }
+    .day-header:hover { background: rgba(30, 41, 59, 0.85); }
+    .day-title { font-weight: 700; color: #fde68a; font-size: 13px; display: flex; align-items: center; gap: 8px; }
+    .works-day-group:not([open]) > .works-list { display: none; }
+    .works-day-group > summary::-webkit-details-marker { display: none; }
+    .works-chevron::before { content: '▶'; }
+    .works-day-group[open] .works-chevron::before { content: '▼'; }
+    .works-chevron, .schedule-chevron, .day-chevron {
+      font-size: 11px;
+      color: #94a3b8;
+      width: 14px;
+      display: inline-block;
+      text-align: center;
+      user-select: none;
+    }
+    .day-count { font-size: 11px; background: #334155; padding: 2px 8px; border-radius: 999px; color: #cbd5e1; }
+    .works-list { padding: 12px; display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 12px; }
+    
+    .work-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 12px 14px;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      gap: 8px;
+      transition: all 0.2s ease;
+    }
+    .work-card:hover {
+      border-color: var(--sky);
+      transform: translateY(-2px);
+      box-shadow: 0 8px 20px rgba(0,0,0,0.25);
+    }
+    .work-card-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
+    .work-title { font-weight: 600; font-size: 13px; color: #f8fafc; line-height: 1.4; word-break: break-word; }
+    .work-meta { font-size: 11px; color: var(--text-muted); display: flex; gap: 8px; flex-wrap: wrap; }
+    .work-excerpt { font-size: 12px; color: #94a3b8; line-height: 1.4; max-height: 48px; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+    .work-actions { display: flex; gap: 8px; align-items: center; border-top: 1px solid var(--border); padding-top: 8px; margin-top: 4px; }
+    .work-actions a, .work-actions button { font-size: 11px; padding: 4px 8px; text-decoration: none; }
+
+    /* SECTION 3: 日程与活动 · 图形可视化 */
+    .section-life-graph { width: 100%; }
+    .tabs-bar { display: flex; gap: 8px; padding: 0 16px; border-bottom: 1px solid var(--border); background: rgba(15, 23, 42, 0.4); }
+    .tab-btn { background: transparent; color: var(--text-muted); border: 0; border-bottom: 2px solid transparent; border-radius: 0; padding: 12px 16px; font-size: 13px; cursor: pointer; }
+    .tab-btn.active { color: #fde68a; border-bottom-color: #fde68a; font-weight: 700; }
+    .graph-container { padding: 18px; max-height: 580px; overflow-y: auto; }
+
+    /* Visual Tree Cards */
+    .tree-node-card {
+      background: rgba(30, 41, 59, 0.4);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      margin-bottom: 10px;
+      transition: all 0.15s ease;
+    }
+    .tree-node-card.active { border-left: 4px solid var(--emerald); background: rgba(16, 185, 129, 0.05); }
+    .tree-node-card.planned { border-left: 4px solid var(--sky); }
+    .tree-node-card.completed { border-left: 4px solid #64748b; }
+    .tree-node-card.interrupted { border-left: 4px solid var(--rose); }
+
+    .node-header {
+      padding: 10px 14px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      cursor: pointer;
+      user-select: none;
+    }
+    .node-header:hover { background: rgba(255, 255, 255, 0.03); }
+    .node-title-wrap { display: flex; align-items: center; gap: 10px; }
+    .node-chevron { font-size: 11px; color: var(--text-muted); transition: transform 0.2s ease; }
+    .node-chevron.expanded { transform: rotate(90deg); }
+    .node-title { font-weight: 600; font-size: 13px; color: #fff; }
+    .status-pill { font-size: 11px; padding: 2px 8px; border-radius: 999px; font-weight: 600; }
+    .status-pill.active { background: #065f46; color: #6ee7b7; border: 1px solid #059669; }
+    .status-pill.planned { background: #075985; color: #7dd3fc; border: 1px solid #0284c7; }
+    .status-pill.completed { background: #334155; color: #cbd5e1; }
+    .status-pill.interrupted { background: #881337; color: #fecdd3; }
+
+    .node-body {
+      padding: 12px 14px 12px 32px;
+      border-top: 1px solid var(--border);
+      font-size: 12px;
+      color: #94a3b8;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      background: rgba(11, 17, 32, 0.4);
+    }
+    .node-children { margin-left: 20px; border-left: 2px dashed var(--border); padding-left: 12px; margin-top: 8px; }
+
+    /* Schedule Timeline */
+    .schedule-day-group { margin-bottom: 14px; background: rgba(15, 23, 42, 0.4); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+    .schedule-day-header { padding: 10px 14px; display: flex; justify-content: space-between; align-items: center; background: rgba(30, 41, 59, 0.5); cursor: pointer; user-select: none; font-size: 13px; font-weight: 600; color: #e2e8f0; }
+    .schedule-day-header:hover { background: rgba(30, 41, 59, 0.8); }
+    .schedule-timeline { padding: 12px 16px; display: flex; flex-direction: column; gap: 10px; }
+    .schedule-item { display: flex; gap: 14px; padding: 10px 12px; background: rgba(30, 41, 59, 0.3); border: 1px solid var(--border); border-radius: 8px; align-items: flex-start; transition: all 0.15s ease; }
+    .schedule-item:hover { border-color: rgba(56, 189, 248, 0.4); background: rgba(30, 41, 59, 0.6); }
+    .schedule-time { min-width: 105px; font-size: 11px; font-weight: 600; color: #7dd3fc; padding-top: 2px; }
+    .schedule-content { flex: 1; display: flex; flex-direction: column; gap: 4px; }
+    .schedule-title-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .schedule-title { font-size: 13px; font-weight: 600; color: #f8fafc; }
+    .schedule-meta { font-size: 11px; color: var(--text-muted); display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+
+    /* Modals */
+    .modal-backdrop {
+      position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(0, 0, 0, 0.7); backdrop-filter: blur(4px);
+      z-index: 100; display: none; align-items: center; justify-content: center;
+    }
+    .modal-backdrop.open { display: flex; }
+    .modal-box {
+      background: #151f32; border: 1px solid var(--border);
+      border-radius: 14px; width: 90%; max-width: 650px; max-height: 85vh;
+      overflow-y: auto; box-shadow: 0 20px 50px rgba(0,0,0,0.5);
+      display: flex; flex-direction: column;
+    }
+    .modal-header { padding: 16px 20px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; }
+    .modal-header h3 { margin: 0; font-size: 16px; color: #fde68a; }
+    .modal-body { padding: 20px; display: flex; flex-direction: column; gap: 14px; font-size: 13px; }
+    .modal-footer { padding: 14px 20px; border-top: 1px solid var(--border); display: flex; justify-content: flex-end; gap: 10px; background: rgba(11, 17, 32, 0.4); }
+    .form-group { display: flex; flex-direction: column; gap: 6px; }
+    .form-group label { font-size: 12px; font-weight: 600; color: #cbd5e1; }
+    .form-group input, .form-group textarea {
+      background: #0b1120; border: 1px solid var(--border); border-radius: 8px;
+      padding: 10px 12px; color: #fff; font: inherit; outline: none;
+    }
+    .form-group textarea { resize: vertical; min-height: 120px; }
+
+    @media (max-width: 960px) {
+      .section-chat { grid-template-columns: 1fr; }
+      #messages { height: 380px; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="header-left">
+      <div class="header-title">
+        <h1>Artificial Life · 持续生命周期</h1>
+        <div class="sub">__TITLE__ · 原生宿主多模型驱动</div>
+      </div>
+      <div class="persona-bar">
+        <span style="font-size:12px; color:var(--text-muted);">👤 人格：</span>
+        <select id="persona-select" aria-label="切换人格"></select>
+        <button id="btn-new-persona" class="secondary" title="新建人格">+ 新建</button>
+        <button id="btn-edit-persona" class="secondary" title="修改核心人设">✏️ 修改人设</button>
+        <button id="btn-reset-persona" class="secondary" title="重置当前人格过往记忆与成果">🔄 重置</button>
+        <button id="btn-delete-persona" class="danger" title="删除当前人格">🗑️ 删除</button>
+      </div>
+    </div>
+    <div class="header-right">
+      <span id="status" class="badge pulse">连接中</span>
+      <select id="exploration-mode" aria-label="探索动机">
+        <option value="persona">从自己的兴趣出发</option>
+        <option value="user_service">为你探索与分担</option>
+      </select>
+      <select id="execution-mode" aria-label="执行节奏">
+        <option value="rhythm">生物钟节奏</option>
+        <option value="continuous">连续工作</option>
+      </select>
+      <button id="heartbeat" class="secondary">推进 Heartbeat</button>
+    </div>
+  </header>
+
+  <main class="container">
+    <!-- 1. 最上面：对话界面 (Chat & Live Persona State) -->
+    <section class="section-chat" aria-label="对话与状态">
+      <div class="panel">
+        <div class="panel-head">
+          <h2>💬 实时对话 <span id="conversation-id" style="font-size:11px; font-weight:normal; color:var(--text-muted);"></span></h2>
+          <div id="reply-status" aria-live="polite" style="font-size:11px; color:#fde68a;"></div>
+        </div>
+        <div id="messages">
+          <div class="empty">还没有对话。输入一句话开始。</div>
+        </div>
+        <form class="chat-form" id="message-form">
+          <textarea class="chat-input" id="message" placeholder="与当前人格交流……（Enter 发送，Shift+Enter 换行）"></textarea>
+          <button id="send" type="submit">发送</button>
+        </form>
+        <div id="chat-error" style="color:#f87171; font-size:11px; padding:4px 16px; min-height:18px;"></div>
+      </div>
+
+      <!-- 右侧：当前人格生命状态卡片 -->
+      <aside class="panel">
+        <div class="panel-head">
+          <h2>👤 人格状态</h2>
+          <span id="logical-time" style="font-size:11px; color:var(--text-muted);">—</span>
+        </div>
+        <div class="state-stack">
+          <div class="persona-profile-card">
+            <div class="name" id="state-persona-name">加载中…</div>
+            <div class="desc" id="state-persona-desc">正在加载核心人设定义…</div>
+          </div>
+          <div class="stat-row">
+            <span class="label">当前活动</span>
+            <span class="val" id="active-activity" style="color:#7dd3fc;">空闲</span>
+          </div>
+          <div class="stat-row">
+            <span class="label">地点 / 情绪</span>
+            <span class="val" id="place-emotion">—</span>
+          </div>
+          <div>
+            <div class="stat-row">
+              <span class="label">能量储备</span>
+              <span class="val" id="energy-val">100%</span>
+            </div>
+            <div class="progress-bar-wrap">
+              <div class="progress-bar progress-energy" id="energy-bar" style="width:100%;"></div>
+            </div>
+          </div>
+          <div>
+            <div class="stat-row">
+              <span class="label">疲劳程度</span>
+              <span class="val" id="fatigue-val">0%</span>
+            </div>
+            <div class="progress-bar-wrap">
+              <div class="progress-bar progress-fatigue" id="fatigue-bar" style="width:0%;"></div>
+            </div>
+          </div>
+          <div>
+            <div style="font-size:11px; font-weight:600; color:var(--text-muted); margin-bottom:6px;">最近时间线事件</div>
+            <div class="timeline-ticker" id="timeline-box"></div>
+          </div>
+        </div>
+      </aside>
+    </section>
+
+    <!-- 2. 然后是：产出结果 · 按日统计 (Deliverables / Works) -->
+    <section class="panel section-works" aria-label="产出结果">
+      <div class="panel-head">
+        <h2>📚 产出结果 · 历史成果 <span id="works-total-badge" style="font-size:11px; background:#334155; padding:2px 8px; border-radius:999px; color:#cbd5e1; font-weight:normal;">0 篇</span></h2>
+        <div class="works-toolbar">
+          <button id="btn-expand-works" class="secondary" style="padding:4px 8px; font-size:11px;">全部展开</button>
+          <button id="btn-collapse-works" class="secondary" style="padding:4px 8px; font-size:11px;">全部收起</button>
+        </div>
+      </div>
+      <div class="works-container" id="works-days-list">
+        <div class="empty" style="padding:24px;">正在检索该人格的历史成果……</div>
+      </div>
+    </section>
+
+    <!-- 3. 然后是：进行的日程与活动 · 图形可视化 (Activities & Schedule) -->
+    <section class="panel section-life-graph" aria-label="日程与活动可视化">
+      <div class="panel-head">
+        <h2>🌲 日程与活动 · 图形可视化</h2>
+        <div style="display:flex; gap:8px;">
+          <button id="btn-expand-tree" class="secondary" style="padding:4px 8px; font-size:11px;">全部展开</button>
+          <button id="btn-collapse-tree" class="secondary" style="padding:4px 8px; font-size:11px;">全部收起</button>
+        </div>
+      </div>
+      <div class="tabs-bar">
+        <button class="tab-btn active" id="tab-btn-activities">活动层次树 (Activity Tree)</button>
+        <button class="tab-btn" id="tab-btn-schedule">日程时间线 (Schedule Tree)</button>
+        <button class="tab-btn" id="tab-btn-memory">记忆树 (Memory Tree)</button>
+        <button class="tab-btn" id="tab-btn-heartbeat">Heartbeat 底层状态</button>
+      </div>
+      <div class="graph-container" id="graph-content">
+        <div id="view-activities"></div>
+        <div id="view-schedule" style="display:none;"></div>
+        <div id="view-memory" style="display:none;"></div>
+        <div id="view-heartbeat" style="display:none;"></div>
+      </div>
+    </section>
+  </main>
+
+  <!-- Modals -->
+  <!-- 1. 修改核心人设弹窗 -->
+  <div class="modal-backdrop" id="modal-edit-persona">
+    <div class="modal-box">
+      <div class="modal-header">
+        <h3>✏️ 修改核心人设</h3>
+        <button class="secondary btn-close-modal">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label>人格显示名称</label>
+          <input type="text" id="edit-persona-name" placeholder="例如：林灯 · 日常幻想轻小说作者" />
+        </div>
+        <div class="form-group">
+          <label>核心人设设定描述（用于模型系统提示与 Identity 核心记忆）</label>
+          <textarea id="edit-persona-def" rows="6" placeholder="输入核心人设设定……"></textarea>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="secondary btn-close-modal">取消</button>
+        <button id="btn-save-persona-edit">保存人设并同步记忆</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 2. 新建人格弹窗 -->
+  <div class="modal-backdrop" id="modal-new-persona">
+    <div class="modal-box">
+      <div class="modal-header">
+        <h3>➕ 新建独立人格</h3>
+        <button class="secondary btn-close-modal">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label>人格标识 ID（英文字母/数字/下划线）</label>
+          <input type="text" id="new-persona-id" placeholder="例如：detective" />
+        </div>
+        <div class="form-group">
+          <label>人格显示名称</label>
+          <input type="text" id="new-persona-name" placeholder="例如：林侦探 · 逻辑与日常谜题解构者" />
+        </div>
+        <div class="form-group">
+          <label>核心人设设定描述</label>
+          <textarea id="new-persona-def" rows="5" placeholder="定义新人格的性格、职业、表达风格与长期目标……"></textarea>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="secondary btn-close-modal">取消</button>
+        <button id="btn-confirm-new-persona">创建并立即切换</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 3. 重置人格确认弹窗 -->
+  <div class="modal-backdrop" id="modal-reset-persona">
+    <div class="modal-box">
+      <div class="modal-header">
+        <h3 style="color:#f87171;">🔄 重置当前人格过往记忆与成果</h3>
+        <button class="secondary btn-close-modal">✕</button>
+      </div>
+      <div class="modal-body">
+        <p style="color:#fca5a5; line-height:1.6; margin:0;">
+          ⚠️ <strong>注意：</strong> 重置操作会将当前人格的所有<strong>过往记忆、活动树、日程树、时间线及作品成果全部归零</strong>！<br/>
+          核心人设默认保留原设定，若需要微调可在下方编辑。
+        </p>
+        <div class="form-group">
+          <label>核心人设确认 / 修改（可选）</label>
+          <textarea id="reset-persona-def" rows="4"></textarea>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="secondary btn-close-modal">取消</button>
+        <button class="danger" id="btn-confirm-reset-persona">确认重置全部记忆与成果</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 4. 删除人格确认弹窗 -->
+  <div class="modal-backdrop" id="modal-delete-persona">
+    <div class="modal-box" style="max-width:480px;">
+      <div class="modal-header">
+        <h3 style="color:#f87171;">🗑️ 删除人格确认</h3>
+        <button class="secondary btn-close-modal">✕</button>
+      </div>
+      <div class="modal-body">
+        <p style="line-height:1.6; margin:0;">
+          确定要彻底删除人格 <strong id="delete-target-name" style="color:#fde68a;"></strong> 及其所有记忆和成果数据吗？<br/>
+          <span style="color:#f87171;">此操作完全不可逆！</span>
+        </p>
+      </div>
+      <div class="modal-footer">
+        <button class="secondary btn-close-modal">取消</button>
+        <button class="danger" id="btn-confirm-delete-persona">确认彻底删除</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 5. 成果在线阅读弹窗 -->
+  <div class="modal-backdrop" id="modal-preview-work">
+    <div class="modal-box" style="max-width:850px;">
+      <div class="modal-header">
+        <h3 id="preview-work-title">成果预览</h3>
+        <button class="secondary btn-close-modal">✕</button>
+      </div>
+      <div class="modal-body">
+        <div style="font-size:11px; color:var(--text-muted);" id="preview-work-meta"></div>
+        <pre id="preview-work-content" style="white-space:pre-wrap; word-break:break-word; font-family:inherit; background:#0b1120; padding:16px; border-radius:8px; border:1px solid var(--border); max-height:60vh; overflow-y:auto; line-height:1.7; font-size:13px;"></pre>
+      </div>
+      <div class="modal-footer">
+        <a id="preview-work-download" class="button secondary" style="padding:6px 12px; font-size:12px;" download>⬇️ 下载文件</a>
+        <button class="secondary btn-close-modal">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const conversationId = new URLSearchParams(location.search).get('conversation_id') || 'default';
+    const $ = (id) => document.getElementById(id);
+    $('conversation-id').textContent = `(频道: ${conversationId})`;
+
+    let currentPersonas = [];
+    let activePersona = null;
+    let streaming = false;
+    let replyPending = false;
+    let pendingReplyRecord = null;
+
+    function esc(s) {
+      return String(s ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+    function time(v) { if (!v) return '—'; try { return new Date(v).toLocaleString(); } catch (_) { return v; } }
+    function showError(msg) { $('chat-error').textContent = msg || ''; }
+    async function api(path, options) {
+      const res = await fetch(path, options);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.message || data.error || '请求失败');
+      return data;
+    }
+
+    // Modal helpers
+    function openModal(id) { $(id).classList.add('open'); }
+    function closeModal(id) { $(id).classList.remove('open'); }
+    document.querySelectorAll('.btn-close-modal').forEach(b => b.addEventListener('click', () => {
+      document.querySelectorAll('.modal-backdrop').forEach(m => m.classList.remove('open'));
+    }));
+
+    // --- Persona Management ---
+    async function loadPersonas() {
+      try {
+        const data = await api('/api/personas');
+        currentPersonas = data.personas || [];
+        activePersona = currentPersonas.find(p => p.id === data.active) || currentPersonas[0];
+        
+        const sel = $('persona-select');
+        sel.innerHTML = '';
+        currentPersonas.forEach(p => {
+          const opt = document.createElement('option');
+          opt.value = p.id;
+          opt.textContent = p.name || p.id;
+          if (p.id === data.active) opt.selected = true;
+          sel.appendChild(opt);
+        });
+
+        if (activePersona) {
+          $('state-persona-name').textContent = activePersona.name || activePersona.id;
+          $('state-persona-desc').textContent = activePersona.definition || '未填写人设定义';
+          $('delete-target-name').textContent = activePersona.name || activePersona.id;
+        }
+      } catch (e) {
+        showError('加载人格列表失败: ' + e.message);
+      }
+    }
+
+    $('persona-select').addEventListener('change', async (e) => {
+      const targetId = e.target.value;
+      if (!targetId) return;
+      try {
+        await api('/api/personas/select', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({persona_id: targetId})
+        });
+        await refreshAll();
+      } catch (err) {
+        showError('切换人格失败: ' + err.message);
+      }
+    });
+
+    // 1. Edit Core Persona
+    $('btn-edit-persona').addEventListener('click', () => {
+      if (!activePersona) return;
+      $('edit-persona-name').value = activePersona.name || activePersona.id;
+      $('edit-persona-def').value = activePersona.definition || '';
+      openModal('modal-edit-persona');
+    });
+
+    $('btn-save-persona-edit').addEventListener('click', async () => {
+      if (!activePersona) return;
+      const name = $('edit-persona-name').value.trim();
+      const def = $('edit-persona-def').value.trim();
+      if (!def) return alert('核心人设描述不能为空');
+      try {
+        await api('/api/personas/update', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({persona_id: activePersona.id, name, definition: def})
+        });
+        closeModal('modal-edit-persona');
+        await refreshAll();
+      } catch (e) {
+        alert('保存失败: ' + e.message);
+      }
+    });
+
+    // 2. New Persona
+    $('btn-new-persona').addEventListener('click', () => {
+      $('new-persona-id').value = '';
+      $('new-persona-name').value = '';
+      $('new-persona-def').value = '';
+      openModal('modal-new-persona');
+    });
+
+    $('btn-confirm-new-persona').addEventListener('click', async () => {
+      const pid = $('new-persona-id').value.trim();
+      const name = $('new-persona-name').value.trim();
+      const def = $('new-persona-def').value.trim();
+      if (!pid || !def) return alert('人格标识ID与核心人设设定不能为空');
+      try {
+        await api('/api/personas/create', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({persona_id: pid, name, definition: def})
+        });
+        closeModal('modal-new-persona');
+        await refreshAll();
+      } catch (e) {
+        alert('创建人格失败: ' + e.message);
+      }
+    });
+
+    // 3. Reset Persona
+    $('btn-reset-persona').addEventListener('click', () => {
+      if (!activePersona) return;
+      $('reset-persona-def').value = activePersona.definition || '';
+      openModal('modal-reset-persona');
+    });
+
+    $('btn-confirm-reset-persona').addEventListener('click', async () => {
+      if (!activePersona) return;
+      const def = $('reset-persona-def').value.trim();
+      try {
+        await api('/api/personas/reset', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({persona_id: activePersona.id, definition: def})
+        });
+        closeModal('modal-reset-persona');
+        await refreshAll();
+        alert('人格记忆与成果已归零，核心人设已生效！');
+      } catch (e) {
+        alert('重置失败: ' + e.message);
+      }
+    });
+
+    // 4. Delete Persona
+    $('btn-delete-persona').addEventListener('click', () => {
+      if (!activePersona) return;
+      if (currentPersonas.length <= 1) return alert('当前只有一个人格，不能删除唯一个人格');
+      $('delete-target-name').textContent = activePersona.name || activePersona.id;
+      openModal('modal-delete-persona');
+    });
+
+    $('btn-confirm-delete-persona').addEventListener('click', async () => {
+      if (!activePersona) return;
+      try {
+        await api('/api/personas/delete', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({persona_id: activePersona.id})
+        });
+        closeModal('modal-delete-persona');
+        await refreshAll();
+      } catch (e) {
+        alert('删除失败: ' + e.message);
+      }
+    });
+
+    // --- Section 1: Dialogue & State ---
+    function messageElement(record, pending=false) {
+      const el = document.createElement('div');
+      el.className = 'message ' + (record.role === 'user' ? 'user' : 'agent') + (pending ? ' pending' : '');
+      const meta = document.createElement('div');
+      meta.className = 'meta';
+      meta.textContent = (record.role === 'user' ? '你' : (activePersona ? activePersona.name : 'Agent')) + ' · ' + time(record.recorded_at);
+      const body = document.createElement('div');
+      body.textContent = record.text || '';
+      el.append(meta, body);
+      return {el, body};
+    }
+
+    function renderDialogue(data) {
+      const box = $('messages');
+      box.textContent = '';
+      if (!data.records || !data.records.length) {
+        box.innerHTML = '<div class="empty">还没有对话。输入一句话开始。</div>';
+        return;
+      }
+      data.records.forEach(r => box.appendChild(messageElement(r).el));
+      box.scrollTop = box.scrollHeight;
+    }
+
+    function appendLiveRecord(record, pending=false) {
+      const box = $('messages');
+      const empty = box.querySelector('.empty');
+      if (empty) empty.remove();
+      const res = messageElement(record, pending);
+      box.appendChild(res.el);
+      box.scrollTop = box.scrollHeight;
+      return res.body;
+    }
+
+    function renderState(data) {
+      const s = data.state;
+      $('status').textContent = '在线';
+      $('status').className = 'badge pulse ' + (s.mode === 'reserved_free' ? 'free' : '');
+      $('logical-time').textContent = time(s.logical_time);
+      $('active-activity').textContent = s.active_activity_id || '空闲 (reserved_free)';
+      $('place-emotion').textContent = `${esc(s.location)} / ${esc(s.emotion)}`;
+      
+      const energyPct = Math.round((s.energy || 1.0) * 100);
+      const fatiguePct = Math.round((s.fatigue || 0.0) * 100);
+      $('energy-val').textContent = `${energyPct}%`;
+      $('energy-bar').style.width = `${energyPct}%`;
+      $('fatigue-val').textContent = `${fatiguePct}%`;
+      $('fatigue-bar').style.width = `${fatiguePct}%`;
+
+      const tbox = $('timeline-box');
+      tbox.textContent = '';
+      (data.timeline || []).slice(-8).reverse().forEach(e => {
+        const item = document.createElement('div');
+        item.className = 'timeline-ticker-item';
+        item.textContent = `#${e.seq} ${time(e.occurred_at).split(' ')[1] || ''} · ${e.event_type}`;
+        tbox.appendChild(item);
+      });
+    }
+
+    async function streamMessage(text) {
+      const res = await fetch('/api/message/stream', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({text, conversation_id: conversationId})
+      });
+      if (!res.ok) {
+        let data = {};
+        try { data = await res.json(); } catch (_) {}
+        throw new Error(data.message || data.error || '请求失败');
+      }
+      const reader = res.body.getReader(), decoder = new TextDecoder();
+      let buffer = '', agentBody = null, doneResponse = null;
+      const dispatch = (block) => {
+        if (!block.trim()) return;
+        let event = 'message', dataText = '';
+        block.split('\n').forEach(line => {
+          if (line.startsWith('event:')) event = line.slice(6).trim();
+          if (line.startsWith('data:')) dataText += line.slice(5).trim();
+        });
+        if (!dataText) return;
+        const payload = JSON.parse(dataText);
+        const data = payload.data || payload;
+        if (event === 'start') {
+          appendLiveRecord(data.user);
+          $('reply-status').textContent = '消息已收到，正在处理…';
+        } else if (event === 'delta' && data.text) {
+          if (!agentBody) agentBody = appendLiveRecord({role:'agent', recorded_at: new Date().toISOString(), text:''}, true);
+          agentBody.textContent += data.text;
+          $('messages').scrollTop = $('messages').scrollHeight;
+        } else if (event === 'done') {
+          doneResponse = data.response || data;
+          replyPending = Boolean(doneResponse.pending);
+          pendingReplyRecord = replyPending ? doneResponse.user?.record_id : null;
+          if (doneResponse.agent) {
+            if (!agentBody) agentBody = appendLiveRecord(doneResponse.agent);
+            else agentBody.textContent = doneResponse.agent.text;
+            agentBody.parentElement.classList.remove('pending');
+          }
+        }
+      };
+      while (true) {
+        const part = await reader.read();
+        if (part.done) break;
+        buffer += decoder.decode(part.value, {stream: true});
+        const blocks = buffer.split('\n\n');
+        buffer = blocks.pop();
+        blocks.forEach(dispatch);
+      }
+      buffer += decoder.decode();
+      dispatch(buffer);
+      if (!doneResponse) throw new Error('流式响应未正常结束');
+      return doneResponse;
+    }
+
+    $('message-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      if (streaming || replyPending) return;
+      const input = $('message');
+      const text = input.value.trim();
+      if (!text) return;
+      $('send').disabled = true;
+      streaming = true;
+      $('reply-status').textContent = '正在思考…';
+      showError('');
+      let cancelled = false;
+      try {
+        const response = await streamMessage(text);
+        cancelled = response.cancelled;
+        input.value = '';
+        await refreshAll();
+      } catch (err) {
+        showError(err.message);
+      } finally {
+        streaming = false;
+        $('send').disabled = replyPending;
+        $('reply-status').textContent = cancelled ? '本次处理已中止，未收到回复。'
+          : replyPending ? '消息已收到，仍在处理…' : '';
+        input.focus();
+        await refreshAll();
+      }
+    });
+
+    $('message').addEventListener('keydown', (event) => {
+      if (event.key==='Enter'&&!event.shiftKey) {
+        event.preventDefault();
+        $('message-form').requestSubmit();
+      }
+    });
+
+    // --- Section 2: 产出结果 · 按日统计 ---
+    let lastWorksData = '';
+    let worksRequest = 0;
+
+    async function loadWorks() {
+      const request = ++worksRequest;
+      try {
+        const data = await api('/api/works');
+        if (request !== worksRequest) return;
+        const snapshot = JSON.stringify(data);
+        if (snapshot === lastWorksData) return;
+        $('works-total-badge').textContent = `${data.total_count || 0} 篇成果`;
+        const container = $('works-days-list');
+        const previous = new Map(Array.from(container.querySelectorAll('.works-day-group'),
+          group => [group.dataset.date, group.open]));
+        container.textContent = '';
+
+        if (!data.days || !data.days.length) {
+          container.innerHTML = '<div class="empty" style="padding:24px;">当前人格还没有已落盘的产出成果。随着自主活动进行将自动呈现。</div>';
+          lastWorksData = snapshot;
+          return;
+        }
+
+        data.days.forEach(day => {
+          const group = document.createElement('details');
+          group.className = 'day-group works-day-group';
+          group.dataset.date = day.date;
+
+          group.open = previous.get(day.date) ?? true;
+          const head = document.createElement('summary');
+          head.className = 'day-header';
+          head.innerHTML = `
+            <div class="day-title">
+              <span class="works-chevron" aria-hidden="true"></span>
+              <span>📅 ${esc(day.date)}</span>
+            </div>
+            <span class="day-count">${day.count} 篇成果</span>
+          `;
+
+          const list = document.createElement('div');
+          list.className = 'works-list';
+
+          day.items.forEach(item => {
+            const card = document.createElement('div');
+            card.className = 'work-card';
+            card.innerHTML = `
+              <div class="work-card-top">
+                <div class="work-title">📄 ${esc(item.title)}</div>
+              </div>
+              <div class="work-meta">
+                <span>⏱️ ${esc(item.time)}</span>
+                <span>📦 ${esc(item.size_text)}</span>
+                <span style="opacity:0.6;">${esc(item.name)}</span>
+              </div>
+              <div class="work-excerpt">${esc(item.excerpt || '暂无摘要内容')}</div>
+              <div class="work-actions">
+                <button class="secondary btn-preview-work" data-path="${esc(item.path)}" data-title="${esc(item.title)}">👁️ 在线阅读</button>
+                <a class="button secondary" href="/api/work-file?path=${encodeURIComponent(item.path)}" download="${esc(item.name)}">⬇️ 下载</a>
+              </div>
+            `;
+            list.appendChild(card);
+          });
+
+          group.append(head, list);
+          container.appendChild(group);
+        });
+        lastWorksData = snapshot;
+
+        // Attach preview listeners
+        document.querySelectorAll('.btn-preview-work').forEach(btn => {
+          btn.addEventListener('click', async (e) => {
+            const path = e.currentTarget.dataset.path;
+            try {
+              const res = await api('/api/work-preview?path=' + encodeURIComponent(path));
+              $('preview-work-title').textContent = res.title || res.name;
+              $('preview-work-meta').textContent = `文件路径: ${res.path} | 大小: ${(res.size / 1024).toFixed(1)} KB`;
+              $('preview-work-content').textContent = res.content || '';
+              $('preview-work-download').href = `/api/work-file?path=${encodeURIComponent(res.path)}`;
+              $('preview-work-download').download = res.name;
+              openModal('modal-preview-work');
+            } catch (err) {
+              alert('读取文件内容失败: ' + err.message);
+            }
+          });
+        });
+
+      } catch (err) {
+        console.error('loadWorks error:', err);
+      }
+    }
+
+    $('btn-expand-works').addEventListener('click', () => {
+      $('works-days-list').querySelectorAll('.works-day-group').forEach(group => group.open = true);
+    });
+    $('btn-collapse-works').addEventListener('click', () => {
+      $('works-days-list').querySelectorAll('.works-day-group').forEach(group => group.open = false);
+    });
+
+    // --- Section 3: 日程与活动 · 图形可视化 ---
+    function renderActivityTree(activities) {
+      const box = $('view-activities');
+      box.textContent = '';
+      if (!activities || !activities.length) {
+        box.innerHTML = '<div class="empty">暂无进行中的活动树数据。</div>';
+        return;
+      }
+
+      const map = new Map();
+      activities.forEach(a => {
+        const pid = a.parent_id || '';
+        if (!map.has(pid)) map.set(pid, []);
+        map.get(pid).push(a);
+      });
+
+      function buildBranch(parentId, target) {
+        const list = map.get(parentId) || [];
+        list.forEach(node => {
+          const card = document.createElement('div');
+          const statusClass = (node.status || 'planned').toLowerCase();
+          card.className = `tree-node-card ${statusClass}`;
+
+          const hasChildren = map.has(node.node_id) && map.get(node.node_id).length > 0;
+          const statusLabels = {active: '执行中', planned: '已规划', completed: '已完成', interrupted: '已中断'};
+
+          const head = document.createElement('div');
+          head.className = 'node-header';
+          head.innerHTML = `
+            <div class="node-title-wrap">
+              <span class="node-chevron ${hasChildren ? 'expanded' : ''}">${hasChildren ? '▼' : '•'}</span>
+              <span class="node-title">${esc(node.title)}</span>
+              <span class="status-pill ${statusClass}">${statusLabels[statusClass] || node.status}</span>
+              ${node.activity_profile?.mode ? `<span style="font-size:11px; background:#1e293b; padding:2px 6px; border-radius:4px; color:#94a3b8;">${node.activity_profile.mode === 'work' ? '💼 工作' : '☕ 恢复'}</span>` : ''}
+            </div>
+            <div style="font-size:11px; color:var(--text-muted);">
+              ${node.actual_start ? `${time(node.actual_start).split(' ')[1]} ~ ${node.actual_end ? time(node.actual_end).split(' ')[1] : '进行中'}` : '未开始'}
+            </div>
+          `;
+
+          const body = document.createElement('div');
+          body.className = 'node-body';
+          let bodyHtml = '';
+          if (node.goal) bodyHtml += `<div>🎯 目标：${esc(node.goal)}</div>`;
+          if (node.summary) bodyHtml += `<div>📝 摘要：${esc(node.summary)}</div>`;
+          body.innerHTML = bodyHtml || '<div>节点详情已折叠</div>';
+
+          const childrenContainer = document.createElement('div');
+          childrenContainer.className = 'node-children';
+          if (hasChildren) {
+            buildBranch(node.node_id, childrenContainer);
+            body.appendChild(childrenContainer);
+          }
+
+          head.addEventListener('click', () => {
+            const isHidden = body.style.display === 'none';
+            body.style.display = isHidden ? 'flex' : 'none';
+            const chev = head.querySelector('.node-chevron');
+            if (hasChildren) chev.textContent = isHidden ? '▼' : '▶';
+          });
+
+          card.append(head, body);
+          target.appendChild(card);
+        });
+      }
+
+      buildBranch('', box);
+    }
+
+    const collapsedScheduleDays = new Set();
+    let scheduleDaysInitialized = false;
+
+    function renderScheduleTree(schedule) {
+      const box = $('view-schedule');
+      box.textContent = '';
+      if (!schedule || !schedule.length) {
+        box.innerHTML = '<div class="empty">暂无日程安排数据。</div>';
+        return;
+      }
+
+      // Filter out pure calendar container nodes and internal heartbeat/lifecycle control pulses
+      const blocks = schedule.filter(item => {
+        if (item.status === 'calendar') return false;
+        if (!item.start || !item.end) return false;
+        if (item.node_id && item.node_id.includes('control-')) return false;
+        if (item.title === 'plan' || item.title === 'route') return false;
+        return true;
+      });
+      if (!blocks.length) {
+        box.innerHTML = '<div class="empty">暂无具体日程时段。</div>';
+        return;
+      }
+
+      const statusLabels = {
+        planned: '计划中',
+        active: '进行中',
+        completed: '已完成',
+        interrupted: '已中断',
+        reserved_free: '自主休息',
+        cancelled: '已取消'
+      };
+
+      // Group by day (YYYY-MM-DD from start)
+      const byDay = {};
+      blocks.forEach(item => {
+        let dayKey = '其它';
+        try {
+          const d = new Date(item.start);
+          if (!isNaN(d.getTime())) {
+            const y = d.getFullYear();
+            const m = String(d.getMonth() + 1).padStart(2, '0');
+            const dt = String(d.getDate()).padStart(2, '0');
+            dayKey = `${y}-${m}-${dt}`;
+          }
+        } catch (_) {
+          dayKey = (item.start || '').split('T')[0] || '其它';
+        }
+        if (!byDay[dayKey]) byDay[dayKey] = [];
+        byDay[dayKey].push(item);
+      });
+
+      const dayKeys = Object.keys(byDay).sort().reverse();
+
+      // On first load, default collapse days beyond the first 2
+      if (!scheduleDaysInitialized) {
+        dayKeys.forEach((key, idx) => {
+          if (idx >= 2) collapsedScheduleDays.add(key);
+        });
+        scheduleDaysInitialized = true;
+      }
+
+      dayKeys.forEach(dayKey => {
+        const dayItems = byDay[dayKey].sort((a, b) => (a.start || '').localeCompare(b.start || ''));
+        const group = document.createElement('div');
+        group.className = 'schedule-day-group';
+        group.dataset.date = dayKey;
+
+        const isCollapsed = collapsedScheduleDays.has(dayKey);
+
+        const head = document.createElement('div');
+        head.className = 'schedule-day-header';
+        head.innerHTML = `
+          <div style="display:flex; align-items:center; gap:8px;">
+            <span class="schedule-chevron">${isCollapsed ? '▶' : '▼'}</span>
+            <span>📅 ${esc(dayKey)}</span>
+          </div>
+          <span style="font-size:11px; color:var(--text-muted);">${dayItems.length} 项日程</span>
+        `;
+
+        const timeline = document.createElement('div');
+        timeline.className = 'schedule-timeline';
+        timeline.style.display = isCollapsed ? 'none' : 'flex';
+
+        dayItems.forEach(item => {
+          const row = document.createElement('div');
+          row.className = 'schedule-item';
+
+          const sTime = item.start ? (time(item.start).split(' ')[1] || time(item.start)) : '--:--';
+          const eTime = item.end ? (time(item.end).split(' ')[1] || time(item.end)) : '--:--';
+          const statusClass = (item.status || '').toLowerCase();
+          const statusLabel = statusLabels[statusClass] || item.status;
+
+          row.innerHTML = `
+            <div class="schedule-time">${esc(sTime)} ~ ${esc(eTime)}</div>
+            <div class="schedule-content">
+              <div class="schedule-title-row">
+                <span class="schedule-title">${esc(item.title)}</span>
+                <span class="status-pill ${statusClass}">${esc(statusLabel)}</span>
+                ${item.activity_profile?.mode ? `<span style="font-size:10px; background:#1e293b; padding:1px 5px; border-radius:4px; color:#94a3b8;">${item.activity_profile.mode === 'work' ? '💼 工作' : '☕ 恢复'}</span>` : ''}
+              </div>
+              <div class="schedule-meta">
+                ${item.activity_id ? `<span>🎯 关联活动: <code>${esc(item.activity_id)}</code></span>` : ''}
+                ${item.route_reason ? `<span style="color:#cbd5e1;">💡 意图: ${esc(item.route_reason)}</span>` : ''}
+              </div>
+            </div>
+          `;
+          timeline.appendChild(row);
+        });
+
+        head.addEventListener('click', () => {
+          const currentlyHidden = timeline.style.display === 'none';
+          if (currentlyHidden) {
+            timeline.style.display = 'flex';
+            head.querySelector('.schedule-chevron').textContent = '▼';
+            collapsedScheduleDays.delete(dayKey);
+          } else {
+            timeline.style.display = 'none';
+            head.querySelector('.schedule-chevron').textContent = '▶';
+            collapsedScheduleDays.add(dayKey);
+          }
+        });
+
+        group.append(head, timeline);
+        box.appendChild(group);
+      });
+    }
+
+    function renderSimpleTree(targetId, nodes) {
+      const box = $(targetId);
+      box.textContent = '';
+      if (!nodes || !nodes.length) { box.innerHTML = '<div class="empty">暂无数据</div>'; return; }
+      nodes.forEach(n => {
+        const d = document.createElement('details');
+        d.style.cssText = 'padding:6px 10px; margin:4px 0; border-left:2px solid var(--border);';
+        d.innerHTML = `<summary style="cursor:pointer; color:#7dd3fc; font-weight:600;">${esc(n.title)} · ${esc(n.status)}</summary><pre style="white-space:pre-wrap; font-size:11px; color:#94a3b8; margin:6px 0 0 12px;">${esc(n.summary || JSON.stringify(n, null, 2))}</pre>`;
+        box.appendChild(d);
+      });
+    }
+
+    // Tabs logic
+    const tabs = ['activities', 'schedule', 'memory', 'heartbeat'];
+    tabs.forEach(t => {
+      const btn = $('tab-btn-' + t);
+      if (btn) {
+        btn.addEventListener('click', () => {
+          tabs.forEach(o => {
+            $('tab-btn-' + o)?.classList.remove('active');
+            const v = $('view-' + o);
+            if (v) v.style.display = 'none';
+          });
+          btn.classList.add('active');
+          const activeView = $('view-' + t);
+          if (activeView) activeView.style.display = 'block';
+        });
+      }
+    });
+
+    $('btn-expand-tree').addEventListener('click', () => {
+      // Activity tree
+      document.querySelectorAll('.node-body').forEach(b => b.style.display = 'flex');
+      document.querySelectorAll('.node-chevron').forEach(c => { if (c.textContent === '▶') c.textContent = '▼'; });
+      // Schedule timeline
+      collapsedScheduleDays.clear();
+      document.querySelectorAll('.schedule-timeline').forEach(t => t.style.display = 'flex');
+      document.querySelectorAll('.schedule-chevron').forEach(c => c.textContent = '▼');
+    });
+    $('btn-collapse-tree').addEventListener('click', () => {
+      // Activity tree
+      document.querySelectorAll('.node-body').forEach(b => b.style.display = 'none');
+      document.querySelectorAll('.node-chevron').forEach(c => { if (c.textContent === '▼') c.textContent = '▶'; });
+      // Schedule timeline
+      document.querySelectorAll('.schedule-day-group').forEach(group => {
+        const d = group.dataset.date;
+        if (d) collapsedScheduleDays.add(d);
+      });
+      document.querySelectorAll('.schedule-timeline').forEach(t => t.style.display = 'none');
+      document.querySelectorAll('.schedule-chevron').forEach(c => c.textContent = '▶');
+    });
+
+    // --- Controls & Global Refresh ---
+    $('heartbeat').addEventListener('click', async () => {
+      $('heartbeat').disabled = true;
+      try {
+        await api('/api/heartbeat', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'});
+        await refreshAll();
+      } catch (e) {
+        showError(e.message);
+      } finally {
+        $('heartbeat').disabled = false;
+      }
+    });
+
+    $('execution-mode').addEventListener('change', async () => {
+      try {
+        await api('/api/tools/call', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({name: 'lifecycle_mode', arguments: {mode: $('execution-mode').value}})
+        });
+        await refreshAll();
+      } catch (e) {
+        showError(e.message);
+      }
+    });
+
+    $('exploration-mode').addEventListener('change', async () => {
+      try {
+        await api('/api/tools/call', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({name: 'exploration_mode', arguments: {mode: $('exploration-mode').value, conversation_id: conversationId}})
+        });
+        await refreshAll();
+      } catch (e) {
+        showError(e.message);
+      }
+    });
+
+    async function refreshAll() {
+      const pendingRecordAtStart = pendingReplyRecord;
+      try {
+        await loadPersonas();
+        const [state, dialogue, structs] = await Promise.all([
+          api('/api/state'),
+          api('/api/dialogue?conversation_id=' + encodeURIComponent(conversationId)),
+          api('/api/structures')
+        ]);
+        renderState(state);
+        if (!streaming) renderDialogue(dialogue);
+        renderActivityTree(structs.activity_tree);
+        renderScheduleTree(structs.schedule_tree);
+        
+        // Memory tree & heartbeat views
+        const memBox = $('view-memory');
+        memBox.innerHTML = '<h4 style="color:#fde68a; margin:8px 0;">活动记忆层次</h4><div id="sub-mem-act"></div><h4 style="color:#fde68a; margin:16px 0 8px;">时间记忆层次</h4><div id="sub-mem-tmp"></div>';
+        renderSimpleTree('sub-mem-act', structs.memory_tree?.activity || []);
+        renderSimpleTree('sub-mem-tmp', structs.memory_tree?.temporal || []);
+
+        const hBox = $('view-heartbeat');
+        hBox.innerHTML = `<pre style="white-space:pre-wrap; font-size:12px; color:#cbd5e1; background:#0b1120; padding:12px; border-radius:8px;">${JSON.stringify(structs.heartbeat, null, 2)}</pre>`;
+
+        $('execution-mode').value = structs.heartbeat?.lifecycle?.mode || 'continuous';
+        $('exploration-mode').value = state.exploration?.mode || 'persona';
+
+        await loadWorks();
+        showError('');
+
+        // Reset replyPending if no pending turns exist for this conversation
+        const pendingTurns = state.pending_turns || [];
+        const hasPending = pendingTurns.some(t => (t.conversation_id || 'default') === conversationId && t.status === 'pending');
+        if (!hasPending && replyPending && pendingReplyRecord === pendingRecordAtStart) {
+          const received = dialogue.records?.some(record =>
+            record.metadata?.reply_to_user_record_id === pendingReplyRecord);
+          replyPending = false;
+          pendingReplyRecord = null;
+          $('send').disabled = false;
+          $('reply-status').textContent = received ? '' : '本次处理已中止，未收到回复。';
+        }
+      } catch (err) {
+        $('status').textContent = '离线';
+        $('status').className = 'badge free';
+        showError(err.message);
+      }
+    }
+
+    refreshAll();
+    setInterval(refreshAll, 6000);
+  </script>
+</body>
+</html>

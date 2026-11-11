@@ -4,10 +4,25 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "artificial-life-agent"
-version = "0.1.0"
+version = "0.4.0"
 description = "Persistent Life Agent V1 with deterministic lifecycle and file-backed memory"
 requires-python = ">=3.12"
 dependencies = []
+
+[project.optional-dependencies]
+mcp = ["mcp>=1.20,<2"]
+test = ["pytest>=8,<10"]
+
+[project.scripts]
+artificial-life-mcp = "artificial_life.mcp_server:main"
+artificial-life-web = "artificial_life.webui:main"
+artificial-life-daemon = "artificial_life.daemon:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+artificial_life = ["assets/*.html"]
 
 [tool.pytest.ini_options]
 addopts = "-ra"

@@ -1,28 +1,30 @@
-"""Small local Web UI for the Persistent Life Agent.
+"""Local Web UI for the Persistent Life Agent with Persona Management.
 
-The adapter intentionally uses only the Python standard library.  It exposes
-read-only state/timeline views and explicit commands for dialogue and
-Heartbeat; it does not turn a user message into a hidden timeline fact or
-mutate canonical memory outside the existing ``PersistentLifeAgent`` APIs.
+The adapter exposes read-only state/timeline views, multi-persona lifecycle management,
+and grouped deliverables.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import threading
-from dataclasses import asdict, dataclass
+import re
+from dataclasses import dataclass
+from datetime import timedelta
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, cast
 from urllib.parse import parse_qs, urlparse
 
-from .persistent_agent import PersistentHeartbeatResult, PersistentLifeAgent
-from .models import iso
+from .plugin import PluginService, TOOLS, load_agent
+from .lease import RootLease
+from .persistent_agent import PersistentLifeAgent
+from .personas import PersonaManager
+from .runner import HeartbeatRunner, RunnerConfig
 
 
-MAX_REQUEST_BYTES = 256 * 1024
+MAX_REQUEST_BYTES = 512 * 1024
 
 
 @dataclass(frozen=True)
@@ -32,7 +34,10 @@ class WebUIConfig:
     host: str = "127.0.0.1"
     port: int = 8765
     conversation_id: str = "default"
-    title: str = "轻小说作家 · Persistent Life Agent"
+    title: str = "Persistent Life Agent"
+    auto_heartbeat: bool = True
+    runner_poll_interval_seconds: float = 1.0
+    heartbeat_interval_minutes: int = 30
 
     def __post_init__(self) -> None:
         if not self.host:
@@ -41,6 +46,10 @@ class WebUIConfig:
             raise ValueError("Web UI port must be between 0 and 65535")
         if not self.conversation_id.strip():
             raise ValueError("conversation_id cannot be empty")
+        if self.runner_poll_interval_seconds <= 0:
+            raise ValueError("runner_poll_interval_seconds must be positive")
+        if self.heartbeat_interval_minutes <= 0:
+            raise ValueError("heartbeat_interval_minutes must be positive")
 
 
 class AgentWebUIServer(ThreadingHTTPServer):
@@ -49,17 +58,124 @@ class AgentWebUIServer(ThreadingHTTPServer):
     allow_reuse_address = True
     daemon_threads = True
 
-    def __init__(self, address: tuple[str, int], agent: PersistentLifeAgent, config: WebUIConfig) -> None:
+    def __init__(self, address: tuple[str, int], agent: PersistentLifeAgent | PluginService, config: WebUIConfig,
+                 persona_manager: PersonaManager | None = None, lifecycle: Any = None, host: Any = None) -> None:
         super().__init__(address, AgentWebUIHandler)
-        self.agent = agent
+        self.tools = agent if isinstance(agent, PluginService) else PluginService(agent)
+        self.agent = self.tools.agent
         self.config = config
-        self.agent_lock = threading.RLock()
+        self.agent_lock = self.agent.lock
+        self.runner: HeartbeatRunner | None = None
+        self.persona_manager = persona_manager
+        self.lifecycle = lifecycle
+        self.host = host
+
+    def start_runner(self) -> None:
+        if not self.config.auto_heartbeat or self.runner is not None:
+            return
+        self.runner = self.tools.runner
+        self.runner.config = RunnerConfig(self.config.runner_poll_interval_seconds)
+        self.runner.start()
+
+    def shutdown(self) -> None:
+        if self.runner is not None:
+            self.runner.stop()
+            self.runner = None
+        super().shutdown()
+
+    def switch_persona(self, persona_id: str) -> str:
+        if not self.persona_manager:
+            raise ValueError("PersonaManager not configured")
+        with self.agent_lock:
+            if self.runner:
+                self.runner.stop()
+                self.runner = None
+            if self.lifecycle:
+                self.lifecycle.stop()
+            workspace = self.persona_manager.get_workspace(persona_id)
+            new_agent = load_agent(workspace, harness=True)
+            self.agent = new_agent
+            self.tools.agent = new_agent
+            self.agent_lock = new_agent.lock
+            self.tools.runner = HeartbeatRunner(new_agent)
+            if self.host:
+                self.host.root = workspace.resolve()
+                self.host.folder = self.host.root / "runtime/host-jobs"
+                self.host.folder.mkdir(parents=True, exist_ok=True)
+                self.host.pending.clear()
+            if self.lifecycle:
+                from .lifecycle import Lifecycle
+                mode = self.lifecycle.state.get("mode", "continuous")
+                self.lifecycle = Lifecycle(self.tools, self.host, interval=self.lifecycle.interval, mode=mode)
+                self.tools.lifecycle = self.lifecycle
+                self.lifecycle.start()
+            self.start_runner()
+            self.persona_manager.set_active_persona_id(persona_id)
+            return persona_id
+
+    def update_core_persona(self, persona_id: str, definition: str, name: str | None = None) -> dict[str, Any]:
+        if not self.persona_manager:
+            raise ValueError("PersonaManager not configured")
+        profile = self.persona_manager.update_persona(persona_id, definition, name)
+        if persona_id == self.persona_manager.get_active_persona_id():
+            with self.agent_lock:
+                core_sections = self.agent.core.read()
+                core_sections["Identity"] = definition
+                core_sections["Persona"] = definition
+                self.agent.core.write(core_sections)
+                from dataclasses import replace
+                self.agent.runtime.config = replace(self.agent.runtime.config, persona=definition)
+        return profile
+
+    def reset_persona(self, persona_id: str, new_definition: str | None = None, new_name: str | None = None) -> dict[str, Any]:
+        if not self.persona_manager:
+            raise ValueError("PersonaManager not configured")
+        is_active = persona_id == self.persona_manager.get_active_persona_id()
+        if is_active:
+            if self.runner:
+                self.runner.stop()
+                self.runner = None
+            if self.lifecycle:
+                self.lifecycle.stop()
+        profile = self.persona_manager.reset_persona(persona_id, new_definition, new_name)
+        if is_active:
+            workspace = self.persona_manager.get_workspace(persona_id)
+            new_agent = load_agent(workspace, harness=True)
+            self.agent = new_agent
+            self.tools.agent = new_agent
+            self.agent_lock = new_agent.lock
+            self.tools.runner = HeartbeatRunner(new_agent)
+            if self.host:
+                self.host.root = workspace.resolve()
+                self.host.folder = self.host.root / "runtime/host-jobs"
+                self.host.folder.mkdir(parents=True, exist_ok=True)
+                self.host.pending.clear()
+            if self.lifecycle:
+                from .lifecycle import Lifecycle
+                mode = self.lifecycle.state.get("mode", "continuous")
+                self.lifecycle = Lifecycle(self.tools, self.host, interval=self.lifecycle.interval, mode=mode)
+                self.tools.lifecycle = self.lifecycle
+                self.lifecycle.start()
+            self.start_runner()
+        return profile
+
+    def delete_persona(self, persona_id: str) -> str:
+        if not self.persona_manager:
+            raise ValueError("PersonaManager not configured")
+        is_active = persona_id == self.persona_manager.get_active_persona_id()
+        if is_active:
+            remaining = [p for p in self.persona_manager.list_personas() if p["id"] != persona_id]
+            if not remaining:
+                raise ValueError("至少需要保留一个人格，无法删除唯一个人格")
+            self.switch_persona(remaining[0]["id"])
+        self.persona_manager.delete_persona(persona_id)
+        return self.persona_manager.get_active_persona_id()
 
 
 class AgentWebUIHandler(BaseHTTPRequestHandler):
     """HTTP routes for the browser client."""
 
-    server_version = "ArtificialLifeWebUI/1.0"
+    server_version = "ArtificialLifeWebUI/2.0"
 
     @property
     def app_server(self) -> AgentWebUIServer:
@@ -70,11 +186,93 @@ class AgentWebUIHandler(BaseHTTPRequestHandler):
         if parsed.path == "/":
             self._send_html(WEB_UI_HTML.replace("__TITLE__", self.app_server.config.title))
             return
+        if parsed.path == "/api/personas":
+            if not self.app_server.persona_manager:
+                self._send_json({"active": "default", "personas": []})
+                return
+            self._send_json({
+                "active": self.app_server.persona_manager.get_active_persona_id(),
+                "personas": self.app_server.persona_manager.list_personas()
+            })
+            return
+        if parsed.path == "/api/works":
+            if not self.app_server.persona_manager:
+                self._send_json({"total_count": 0, "days": []})
+                return
+            active_id = self.app_server.persona_manager.get_active_persona_id()
+            self._send_json(self.app_server.persona_manager.get_works_by_date(active_id))
+            return
+        if parsed.path == "/api/work-preview":
+            query = parse_qs(parsed.query)
+            rel_path = query.get("path", [""])[0].strip()
+            if not rel_path:
+                self._send_json({"error": "path required"}, status=HTTPStatus.BAD_REQUEST)
+                return
+            workspace = self.app_server.agent.root
+            target = (workspace / rel_path).resolve()
+            if not target.is_relative_to(workspace / "works") or not target.is_file():
+                self._send_json({"error": "file not found"}, status=HTTPStatus.NOT_FOUND)
+                return
+            content = target.read_text(encoding="utf-8", errors="replace")
+            title = ""
+            for line in content.splitlines():
+                line = line.strip()
+                if line and not line.startswith("<!--"):
+                    title = re.sub(r"^[#*>\-\s]+", "", line).strip()
+                    break
+            self._send_json({
+                "name": target.name,
+                "title": title or target.stem,
+                "path": rel_path,
+                "content": content,
+                "size": target.stat().st_size
+            })
+            return
+        if parsed.path == "/api/tools":
+            self._send_json({"tools": [{"name": name, **definition} for name, definition in TOOLS.items()]})
+            return
+        if parsed.path == "/api/work-file":
+            query = parse_qs(parsed.query)
+            rel_path = query.get("path", [""])[0].strip()
+            workspace = self.app_server.agent.root
+            target = (workspace / rel_path).resolve() if rel_path else None
+            if target and target.is_relative_to(workspace / "works") and target.is_file():
+                content = target.read_bytes()
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", "application/octet-stream")
+                self.send_header("Content-Disposition", f'attachment; filename="{target.name}"')
+                self.send_header("Content-Length", str(len(content)))
+                self.end_headers()
+                self.wfile.write(content)
+                return
+            try:
+                file = self.app_server.tools.call("work_file", {
+                    "path": rel_path,
+                    "conversation_id": query.get("conversation_id", [self.app_server.config.conversation_id])[0]})
+                content = file["content"].encode("utf-8")
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", "application/octet-stream")
+                self.send_header("Content-Disposition", 'attachment; filename="' + file["name"] + '"')
+                self.send_header("Content-Length", str(len(content)))
+                self.end_headers()
+                self.wfile.write(content)
+                return
+            except Exception:
+                self._send_json({"error": "work_file_unavailable"}, status=HTTPStatus.NOT_FOUND)
+                return
         if parsed.path == "/api/health":
             self._send_json(self._health())
             return
         if parsed.path == "/api/state":
             self._send_json(self._state())
+            return
+        if parsed.path == "/api/structures":
+            self._send_json(self.app_server.tools.call("structure_get"))
+            return
+        if parsed.path == "/api/work":
+            query = parse_qs(parsed.query)
+            self._send_json(self.app_server.tools.call("work_list", {
+                "conversation_id": query.get("conversation_id", [self.app_server.config.conversation_id])[0]}))
             return
         if parsed.path == "/api/dialogue":
             query = parse_qs(parsed.query)
@@ -93,8 +291,47 @@ class AgentWebUIHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         try:
             body = self._read_json()
+            if parsed.path == "/api/personas/select":
+                active = self.app_server.switch_persona(body.get("persona_id"))
+                self._send_json({"ok": True, "active": active})
+                return
+            if parsed.path == "/api/personas/create":
+                created = self.app_server.persona_manager.create_persona(
+                    body.get("persona_id", ""),
+                    body.get("name", ""),
+                    body.get("definition", "")
+                )
+                self.app_server.switch_persona(created["id"])
+                self._send_json({"ok": True, "persona": created, "active": created["id"]})
+                return
+            if parsed.path == "/api/personas/update":
+                updated = self.app_server.update_core_persona(
+                    body.get("persona_id", ""),
+                    body.get("definition", ""),
+                    body.get("name")
+                )
+                self._send_json({"ok": True, "persona": updated})
+                return
+            if parsed.path == "/api/personas/reset":
+                reset = self.app_server.reset_persona(
+                    body.get("persona_id", ""),
+                    body.get("definition"),
+                    body.get("name")
+                )
+                self._send_json({"ok": True, "persona": reset})
+                return
+            if parsed.path == "/api/personas/delete":
+                active = self.app_server.delete_persona(body.get("persona_id", ""))
+                self._send_json({"ok": True, "active": active})
+                return
+            if parsed.path == "/api/tools/call":
+                self._send_json(self.app_server.tools.call(body.get("name"), body.get("arguments")))
+                return
             if parsed.path == "/api/message":
                 self._send_json(self._message(body), status=HTTPStatus.CREATED)
+                return
+            if parsed.path == "/api/message/stream":
+                self._stream_message(body)
                 return
             if parsed.path == "/api/heartbeat":
                 self._send_json(self._heartbeat(body))
@@ -102,100 +339,49 @@ class AgentWebUIHandler(BaseHTTPRequestHandler):
             self._send_json({"error": "not_found", "path": parsed.path}, status=HTTPStatus.NOT_FOUND)
         except ValueError as exc:
             self._send_json({"error": "bad_request", "message": str(exc)}, status=HTTPStatus.BAD_REQUEST)
-        except Exception as exc:  # pragma: no cover - final safety net for a live server
+        except Exception as exc:  # pragma: no cover
             self._send_json({"error": "internal_error", "message": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
 
     def log_message(self, format: str, *args: Any) -> None:
-        # Keep the demo terminal readable; callers can add their own logging.
         return
 
-    def _health(self) -> dict[str, Any]:
-        app = self.app_server.agent
-        with self.app_server.agent_lock:
-            return {
-                "ok": True,
-                "persona": app.runtime.config.persona,
-                "provider": type(app.provider).__name__,
-                "root": str(app.root),
-                "logical_time": iso(app.runtime.state.logical_time),
-            }
+    def _health(self):
+        return self.app_server.tools.call("health")
 
-    def _state(self) -> dict[str, Any]:
-        app = self.app_server.agent
-        with self.app_server.agent_lock:
-            activities = [_activity_dict(activity) for activity in app.activities.all()]
-            goals = [goal.to_dict() for goal in app.runtime.goals.all()]
-            schedule = [block.to_dict() for block in app.runtime.schedule.all()]
-            state = app.runtime.state.to_dict()
-            return {
-                "state": state,
-                "activities": activities,
-                "goals": goals,
-                "schedule": schedule,
-                "timeline": [event.to_dict() for event in app.runtime.timeline.events()[-50:]],
-            }
+    def _state(self):
+        return self.app_server.tools.call("state")
 
-    def _dialogue(self, conversation_id: str, limit: int) -> dict[str, Any]:
-        app = self.app_server.agent
-        with self.app_server.agent_lock:
-            records = [
-                record
-                for record in app.raw.agent.records() + app.raw.user.records()
-                if record.conversation_id == conversation_id
-            ]
-            # User input is appended before the explicit UI response.  When
-            # both use the same clock instant, role order preserves that
-            # conversational sequence instead of sorting by separate stream
-            # prefixes (``ar_``/``ur_``).
-            records.sort(key=lambda record: (record.recorded_at, 0 if record.role == "user" else 1, record.record_id))
-            return {"conversation_id": conversation_id, "records": [record.to_dict() for record in records[-limit:]]}
+    def _dialogue(self, conversation_id, limit):
+        return self.app_server.tools.call("dialogue_history", {"conversation_id": conversation_id, "limit": limit})
 
-    def _timeline(self, limit: int) -> dict[str, Any]:
-        app = self.app_server.agent
-        with self.app_server.agent_lock:
-            events = app.runtime.timeline.events()
-            return {"events": [event.to_dict() for event in events[-limit:]]}
+    def _timeline(self, limit):
+        return self.app_server.tools.call("timeline", {"limit": limit})
 
-    def _message(self, body: dict[str, Any]) -> dict[str, Any]:
+    def _message(self, body):
+        return self.app_server.tools.call("dialogue_reply", {
+            "text": _required_text(body, "text", max_length=10000),
+            "conversation_id": body.get("conversation_id") or self.app_server.config.conversation_id})
+
+    def _stream_message(self, body):
+        from contextlib import closing
         text = _required_text(body, "text", max_length=10000)
-        conversation_id = str(body.get("conversation_id") or self.app_server.config.conversation_id).strip()
-        if not conversation_id:
-            raise ValueError("conversation_id cannot be empty")
-        app = self.app_server.agent
-        with self.app_server.agent_lock:
-            user_record = app.receive_user_message(text, conversation_id=conversation_id)
-            context = app.build_user_context(conversation_id=conversation_id, query=text)
-            # The UI makes an explicit response request.  A raw user-message
-            # ingestion elsewhere still remains input-only per the invariant.
-            result = app.provider.generate(
-                text,
-                purpose="dialogue_response",
-                context=context.to_dict(),
-            )
-            reply = result.text.strip()
-            if not reply or result.provider == "mock":
-                reply = f"收到，我已记下：{text}"
-            agent_record = app.send_agent_message(reply, conversation_id=conversation_id)
-            return {
-                "conversation_id": conversation_id,
-                "user": user_record.to_dict(),
-                "agent": agent_record.to_dict(),
-                "provider": result.provider,
-                "context_source_refs": list(context.source_refs),
-            }
+        conversation_id = body.get("conversation_id") or self.app_server.config.conversation_id
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache, no-store")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.close_connection = True
+        try:
+            with closing(self.app_server.tools.stream(text, conversation_id)) as stream:
+                for event in stream:
+                    self.wfile.write(event.to_sse())
+                    self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            return
 
-    def _heartbeat(self, body: dict[str, Any]) -> dict[str, Any]:
-        # ``at`` is intentionally optional.  Parsing an explicit instant is
-        # useful for deterministic/manual UI tests; normal browsers use the
-        # persisted SystemClock.
-        at = body.get("at")
-        from datetime import datetime
-
-        moment = datetime.fromisoformat(str(at).replace("Z", "+00:00")) if at else None
-        app = self.app_server.agent
-        with self.app_server.agent_lock:
-            result = app.heartbeat(moment)
-            return _heartbeat_dict(result)
+    def _heartbeat(self, body):
+        return self.app_server.tools.call("heartbeat", body)
 
     def _read_json(self) -> dict[str, Any]:
         length_text = self.headers.get("Content-Length")
@@ -235,47 +421,50 @@ class AgentWebUIHandler(BaseHTTPRequestHandler):
         self.wfile.write(payload)
 
 
-def create_server(agent: PersistentLifeAgent, config: WebUIConfig | None = None) -> AgentWebUIServer:
-    """Create a server without starting a background thread.
-
-    Passing port ``0`` lets tests or embedding hosts ask the OS for a free
-    local port.  The caller owns ``serve_forever``/``shutdown``.
-    """
-
+def create_server(agent: PersistentLifeAgent | PluginService, config: WebUIConfig | None = None,
+                  persona_manager: PersonaManager | None = None, lifecycle: Any = None, host: Any = None) -> AgentWebUIServer:
     config = config or WebUIConfig()
-    return AgentWebUIServer((config.host, config.port), agent, config)
+    return AgentWebUIServer((config.host, config.port), agent, config, persona_manager=persona_manager, lifecycle=lifecycle, host=host)
 
 
-def serve(agent: PersistentLifeAgent, config: WebUIConfig | None = None) -> None:
-    """Run the blocking local server until Ctrl+C."""
-
-    server = create_server(agent, config)
+def serve(agent: PersistentLifeAgent, config: WebUIConfig | None = None, persona_manager: PersonaManager | None = None) -> None:
+    server = create_server(agent, config, persona_manager=persona_manager)
     print(f"Persistent Life Agent Web UI: http://{server.server_address[0]}:{server.server_address[1]}")
+    server.start_runner()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
+        if server.runner is not None:
+            server.runner.stop()
         server.server_close()
 
 
-def load_or_initialize(root: Path) -> PersistentLifeAgent:
-    """Load an existing agent or create an empty light-novel-writer root."""
-
-    if (root / "manifest.json").exists():
-        return PersistentLifeAgent(root)
-    return PersistentLifeAgent.initialize(root)
+def load_or_initialize(root: Path, *, heartbeat_interval: timedelta | None = None) -> PersistentLifeAgent:
+    return load_agent(root, heartbeat_interval=heartbeat_interval)
 
 
 def main(argv: list[str] | None = None) -> None:
+    from .personas import persona_arguments
     parser = argparse.ArgumentParser(description="Run the local Persistent Life Agent Web UI")
+    persona_arguments(parser)
     parser.add_argument("--root", type=Path, default=Path("var/web_agent"))
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--conversation-id", default="default")
+    parser.add_argument("--heartbeat-minutes", type=int, default=30)
+    parser.add_argument("--harness", action="store_true", help="Record input for the harness; never call a nested LLM")
     args = parser.parse_args(argv)
-    agent = load_or_initialize(args.root)
-    serve(agent, WebUIConfig(args.host, args.port, args.conversation_id))
+
+    mgr = PersonaManager(args.root)
+    mgr.ensure_layout()
+    active_id = args.persona_id or mgr.get_active_persona_id()
+    workspace = mgr.get_workspace(active_id)
+
+    with RootLease(args.root):
+        agent = load_agent(workspace, harness=args.harness, heartbeat_interval=timedelta(minutes=args.heartbeat_minutes))
+        serve(agent, WebUIConfig(args.host, args.port, args.conversation_id, heartbeat_interval_minutes=args.heartbeat_minutes), persona_manager=mgr)
 
 
 def _required_text(body: dict[str, Any], key: str, *, max_length: int) -> str:
@@ -295,88 +484,7 @@ def _bounded_int(value: str, minimum: int, maximum: int) -> int:
     return max(minimum, min(maximum, parsed))
 
 
-def _activity_dict(activity: Any) -> dict[str, Any]:
-    return {
-        "activity_id": activity.activity_id,
-        "name": activity.name,
-        "goal": activity.goal,
-        "parent_activity": activity.parent_activity,
-        "planned_start_time": iso(activity.planned_start_time),
-        "expected_end_time": iso(activity.expected_end_time),
-        "actual_start_time": iso(activity.actual_start_time),
-        "actual_end_time": iso(activity.actual_end_time),
-        "status": activity.status,
-        "summary": activity.final_summary or activity.live_summary or activity.summary,
-        "children": list(activity.children),
-        "execution_segments": [segment.to_dict() for segment in activity.execution_segments],
-    }
-
-
-def _heartbeat_dict(result: PersistentHeartbeatResult) -> dict[str, Any]:
-    return {
-        "heartbeat_id": result.heartbeat.heartbeat_id,
-        "no_op": result.heartbeat.no_op,
-        "events": [event.to_dict() for event in result.heartbeat.events],
-        "state": result.heartbeat.state.to_dict(),
-        "random_event": asdict(result.random_event) if result.random_event else None,
-        "interrupted_activity_id": result.interrupted_activity_id,
-        "random_activity_id": result.random_activity_id,
-        "expected_end_activity_ids": list(result.expected_end_activity_ids),
-    }
-
-
-WEB_UI_HTML = r'''<!doctype html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>__TITLE__</title>
-  <style>
-    :root { color-scheme: dark; --bg:#111827; --panel:#1f2937; --panel2:#243247; --line:#374151; --text:#eef2ff; --muted:#9ca3af; --accent:#f59e0b; --user:#155e75; --agent:#334155; }
-    * { box-sizing:border-box; } body { margin:0; min-height:100vh; background:linear-gradient(135deg,#111827,#172033); color:var(--text); font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif; }
-    header { border-bottom:1px solid var(--line); padding:16px 24px; display:flex; align-items:center; justify-content:space-between; gap:16px; }
-    h1,h2,h3,p { margin:0; } h1 { font-size:19px; } h2 { font-size:15px; color:#fde68a; } .muted { color:var(--muted); font-size:12px; }
-    .layout { max-width:1400px; margin:0 auto; padding:20px; display:grid; grid-template-columns:minmax(0,1fr) 360px; gap:18px; }
-    .panel { background:rgba(31,41,55,.88); border:1px solid var(--line); border-radius:14px; box-shadow:0 16px 40px #0003; overflow:hidden; }
-    .panel-head { padding:14px 16px; border-bottom:1px solid var(--line); display:flex; justify-content:space-between; align-items:center; }
-    #messages { height:calc(100vh - 230px); min-height:400px; overflow-y:auto; padding:18px; display:flex; flex-direction:column; gap:12px; }
-    .message { max-width:82%; padding:11px 14px; border-radius:13px; white-space:pre-wrap; word-break:break-word; }
-    .message.user { align-self:flex-end; background:var(--user); border-bottom-right-radius:3px; } .message.agent { align-self:flex-start; background:var(--agent); border-bottom-left-radius:3px; }
-    .message .meta { color:#cbd5e1; font-size:11px; margin-bottom:4px; } .empty { color:var(--muted); text-align:center; margin:auto; }
-    form { border-top:1px solid var(--line); padding:14px; display:flex; gap:10px; align-items:flex-end; } textarea { flex:1; resize:vertical; min-height:50px; max-height:160px; padding:11px; border:1px solid var(--line); border-radius:10px; background:#111827; color:var(--text); font:inherit; }
-    button { border:0; border-radius:9px; padding:10px 14px; background:var(--accent); color:#241300; font-weight:700; cursor:pointer; } button.secondary { background:#475569; color:var(--text); } button:disabled { opacity:.5; cursor:wait; }
-    .stack { padding:14px 16px; display:flex; flex-direction:column; gap:14px; } .row { display:flex; justify-content:space-between; gap:12px; } .value { text-align:right; color:#d1d5db; word-break:break-word; }
-    .badge { display:inline-block; padding:3px 8px; border-radius:999px; background:#065f46; color:#bbf7d0; font-size:12px; } .badge.free { background:#374151; color:#d1d5db; }
-    .list { display:flex; flex-direction:column; gap:6px; max-height:180px; overflow:auto; } .list-item { padding:8px 9px; border:1px solid #334155; border-radius:8px; font-size:12px; }
-    .timeline { max-height:230px; overflow:auto; font:11px/1.4 ui-monospace,SFMono-Regular,monospace; color:#cbd5e1; } .timeline div { padding:5px 0; border-bottom:1px solid #334155; }
-    .toolbar { display:flex; gap:8px; align-items:center; } .error { color:#fca5a5; font-size:12px; min-height:18px; }
-    @media (max-width:900px) { .layout { grid-template-columns:1fr; } #messages { height:55vh; } }
-  </style>
-</head>
-<body>
-  <header><div><h1>轻小说作家</h1><div class="muted">__TITLE__ · 文件持久化 Agent</div></div><div class="toolbar"><span id="status" class="badge">连接中</span><button id="heartbeat" class="secondary">推进 Heartbeat</button></div></header>
-  <main class="layout">
-    <section class="panel"><div class="panel-head"><h2>对话</h2><span id="conversation-id" class="muted"></span></div><div id="messages"><div class="empty">还没有对话。输入一句话开始。</div></div><form id="message-form"><textarea id="message" placeholder="和轻小说作家聊聊……（Ctrl/⌘ + Enter 发送）"></textarea><button id="send" type="submit">发送</button></form><div id="error" class="error" style="padding:0 14px 12px"></div></section>
-    <aside class="panel"><div class="panel-head"><h2>生命状态</h2><span id="logical-time" class="muted">—</span></div><div class="stack"><div class="row"><span>模式</span><span id="mode" class="value">—</span></div><div class="row"><span>当前活动</span><span id="active" class="value">—</span></div><div class="row"><span>地点 / 情绪</span><span id="place" class="value">—</span></div><div class="row"><span>能量 / 疲劳</span><span id="energy" class="value">—</span></div><div><h3>活动</h3><div id="activities" class="list" style="margin-top:7px"></div></div><div><h3>目标</h3><div id="goals" class="list" style="margin-top:7px"></div></div><div><h3>最近 Timeline</h3><div id="timeline" class="timeline" style="margin-top:7px"></div></div></div></aside>
-  </main>
-  <script>
-    const conversationId = new URLSearchParams(location.search).get('conversation_id') || 'default';
-    const $ = (id) => document.getElementById(id);
-    $('conversation-id').textContent = 'conversation: ' + conversationId;
-    function esc(value) { return String(value ?? ''); }
-    function time(value) { if (!value) return '—'; try { return new Date(value).toLocaleString(); } catch (_) { return value; } }
-    function showError(message='') { $('error').textContent = message; }
-    async function api(path, options) { const res = await fetch(path, options); const data = await res.json(); if (!res.ok) throw new Error(data.message || data.error || '请求失败'); return data; }
-    function renderDialogue(data) { const box=$('messages'); box.textContent=''; if (!data.records.length) { box.innerHTML='<div class="empty">还没有对话。输入一句话开始。</div>'; return; } data.records.forEach(record => { const el=document.createElement('div'); el.className='message '+(record.role==='user'?'user':'agent'); const meta=document.createElement('div'); meta.className='meta'; meta.textContent=(record.role==='user'?'你':'轻小说作家')+' · '+time(record.recorded_at); const body=document.createElement('div'); body.textContent=record.text; el.append(meta,body); box.appendChild(el); }); box.scrollTop=box.scrollHeight; }
-    function renderState(data) { const s=data.state; $('status').textContent='在线'; $('status').className='badge '+(s.mode==='reserved_free'?'free':''); $('logical-time').textContent=time(s.logical_time); $('mode').textContent=s.mode; $('active').textContent=s.active_activity_id || 'reserved_free'; $('place').textContent=esc(s.location)+' / '+esc(s.emotion); $('energy').textContent=Math.round(s.energy*100)+'% / '+Math.round(s.fatigue*100)+'%'; const list=$('activities'); list.textContent=''; data.activities.forEach(a=>{const el=document.createElement('div');el.className='list-item';el.textContent=a.name+' · '+a.status;list.appendChild(el)}); if(!data.activities.length) list.innerHTML='<span class="muted">暂无活动</span>'; const goals=$('goals'); goals.textContent=''; data.goals.forEach(g=>{const el=document.createElement('div');el.className='list-item';el.textContent=g.title+' · '+g.level+' · '+g.status;goals.appendChild(el)}); if(!data.goals.length) goals.innerHTML='<span class="muted">暂无目标</span>'; const timeline=$('timeline');timeline.textContent=''; data.timeline.slice(-20).reverse().forEach(e=>{const el=document.createElement('div');el.textContent='#'+e.seq+' '+time(e.occurred_at)+' '+e.event_type;timeline.appendChild(el)}); }
-    async function refresh() { try { const [state, dialogue] = await Promise.all([api('/api/state'),api('/api/dialogue?conversation_id='+encodeURIComponent(conversationId))]); renderState(state); renderDialogue(dialogue); showError(''); } catch (e) { $('status').textContent='离线'; $('status').className='badge free'; showError(e.message); } }
-    $('message-form').addEventListener('submit', async (event)=>{event.preventDefault();const input=$('message');const text=input.value.trim();if(!text)return; $('send').disabled=true;showError('');try{await api('/api/message',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text,conversation_id:conversationId})});input.value='';await refresh();}catch(e){showError(e.message)}finally{$('send').disabled=false;input.focus()}});
-    $('message').addEventListener('keydown',(event)=>{if((event.ctrlKey||event.metaKey)&&event.key==='Enter')$('message-form').requestSubmit()});
-    $('heartbeat').addEventListener('click',async()=>{ $('heartbeat').disabled=true;showError('');try{await api('/api/heartbeat',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});await refresh()}catch(e){showError(e.message)}finally{$('heartbeat').disabled=false}});
-    refresh(); setInterval(refresh,15000);
-  </script>
-</body>
-</html>'''
+WEB_UI_HTML = (Path(__file__).parent / 'assets' / 'webui.html').read_text(encoding='utf-8')
 
 
 if __name__ == "__main__":

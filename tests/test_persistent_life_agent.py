@@ -122,6 +122,8 @@ def test_context_contains_active_paths_plan_recent_raw_and_user_memory(tmp_path)
     user_context = builder.build_user(current_state={"logical_time": moment(9, 10).isoformat()}, conversation_id="chat-1", now=moment(9, 10))
     assert "user_core_memory" in user_context.base
     assert user_context.working["recent_raw_user_agent_conversation"]
+    assert "active_activity_path" not in user_context.working
+    assert "current_activity_recent_raw" not in user_context.working
     assert user_context.base["conversation_timeline_current_path"]
 
 
@@ -181,7 +183,7 @@ def test_persistent_agent_heartbeat_random_hook_and_user_context(tmp_path):
     assert context.kind == "user"
     assert context.working["recent_raw_user_agent_conversation"]
     assert any(event.event_type == "random_event.triggered" for event in agent.runtime.timeline.events())
-    restarted = PersistentLifeAgent(tmp_path / "agent", clock=clock)
+    restarted = PersistentLifeAgent(tmp_path / "agent", clock=clock, provider=MockLLMProvider())
     assert restarted.activities.get("novel").status == "interrupted"
     assert restarted.runtime.state.active_activity_id is None
     assert restarted.runtime.state.mode.value == "reserved_free"
@@ -191,7 +193,7 @@ def test_persistent_agent_heartbeat_random_hook_and_user_context(tmp_path):
 
 def test_heartbeat_interrupts_activity_at_expected_end_and_keeps_it_unfinished(tmp_path):
     clock = TestClock(moment(9))
-    agent = PersistentLifeAgent.initialize(tmp_path / "agent", clock=clock)
+    agent = PersistentLifeAgent.initialize(tmp_path / "agent", clock=clock, provider=MockLLMProvider())
     agent.create_activity(activity_id="chapter", name="第二章", expected_end_time=moment(10))
     agent.start_activity("chapter", moment(9))
     result = agent.heartbeat(moment(10))
@@ -203,13 +205,13 @@ def test_heartbeat_interrupts_activity_at_expected_end_and_keeps_it_unfinished(t
 
 def test_dynamic_activity_state_projection_survives_restart(tmp_path):
     clock = TestClock(moment(9))
-    agent = PersistentLifeAgent.initialize(tmp_path / "agent", clock=clock)
+    agent = PersistentLifeAgent.initialize(tmp_path / "agent", clock=clock, provider=MockLLMProvider())
     agent.create_activity(activity_id="scene", name="场景", goal="完成场景")
     agent.start_activity("scene", moment(9))
     assert agent.runtime.state.active_activity_id == "scene"
     assert agent.runtime.state.mode.value == "working"
 
-    restarted = PersistentLifeAgent(tmp_path / "agent", clock=clock)
+    restarted = PersistentLifeAgent(tmp_path / "agent", clock=clock, provider=MockLLMProvider())
     assert restarted.runtime.state.active_activity_id == "scene"
     assert restarted.runtime.state.mode.value == "working"
     restarted.interrupt_activity("scene", "用户对话打断", moment(9, 30))
@@ -231,7 +233,7 @@ def test_replan_includes_planned_schedule_candidates(tmp_path):
     medium = Goal("medium", GoalLevel.MEDIUM, "完成章节", parent_id="large")
     large = Goal("large", GoalLevel.LARGE, "完成小说")
     schedule = ScheduleBlock("writing", "small", moment(9), moment(12), activity_type="writing")
-    agent = PersistentLifeAgent.initialize(tmp_path / "agent", goals=[large, medium, goal], schedule=[schedule], clock=clock, config=RuntimeConfig())
+    agent = PersistentLifeAgent.initialize(tmp_path / "agent", goals=[large, medium, goal], schedule=[schedule], clock=clock, config=RuntimeConfig(), provider=MockLLMProvider())
     candidates = agent.replan(at=moment(8))["candidates"]
     assert any(candidate.get("schedule_id") == "writing" for candidate in candidates)
 

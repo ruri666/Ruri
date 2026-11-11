@@ -75,11 +75,33 @@ class SchedulePlan:
         self._blocks: dict[str, ScheduleBlock] = {}
         for block in blocks or []:
             self.add(block)
+        self.validate()
+
+    def validate(self) -> None:
+        for block in self._blocks.values():
+            seen = {block.id}
+            current = block
+            while current.metadata.get("parent_schedule_id"):
+                parent_id = current.metadata["parent_schedule_id"]
+                if parent_id in seen:
+                    raise ValueError("cycle in schedule tree")
+                seen.add(parent_id)
+                if parent_id not in self._blocks:
+                    raise ValueError(f"unknown schedule parent: {parent_id}")
+                parent = self._blocks[parent_id]
+                if not parent.start_at <= current.start_at < current.end_at <= parent.end_at:
+                    raise ValueError("child schedule must fit its parent window")
+                current = parent
 
     def add(self, block: ScheduleBlock) -> None:
         if block.id in self._blocks:
             raise ValueError(f"duplicate schedule id: {block.id}")
         self._blocks[block.id] = block
+
+    def remove(self, schedule_id: str) -> None:
+        if schedule_id in self._blocks:
+            del self._blocks[schedule_id]
+            self.validate()
 
     def all(self) -> list[ScheduleBlock]:
         return sorted(self._blocks.values(), key=lambda item: (item.start_at, item.id))
@@ -114,6 +136,7 @@ class PlanStore:
         return GoalTree([Goal.from_dict(item) for item in data.get("goals", [])])
 
     def save_schedule(self, schedule: SchedulePlan) -> None:
+        schedule.validate()
         atomic_write_json(
             self.schedule_path,
             {"schema_version": 1, "schedule": [block.to_dict() for block in schedule.all()]},

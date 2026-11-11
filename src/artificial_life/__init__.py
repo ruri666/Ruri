@@ -1,7 +1,8 @@
 """Persistent Life Agent V1 and its deterministic Phase 1 kernel.
 
-The optional LLM surface is provider-neutral and defaults to a deterministic
-mock; no network provider is imported by this package.
+The optional LLM surface is provider-neutral. A configured DeepSeek key selects
+the fixed production model automatically; Mock remains available explicitly
+for offline tests and demos.
 """
 
 from .clock import Clock, SystemClock, TestClock
@@ -30,9 +31,12 @@ from .conversation import ConversationMemory
 from .summaries import SummaryService
 from .retrieval import FileTreeRetriever, MemoryRouter, RetrievalResult
 from .context import ContextBuilder, ContextBundle, ContextConfig
-from .llm import LLMProvider, MockLLMProvider
+from .llm import DEFAULT_DEEPSEEK_MODEL, DeepSeekProvider, LLMProvider, LLMResult, MockLLMProvider, OllamaProvider, default_provider
 from .random_events import RandomEventEngine, RandomEventSpec
+from .dialogue_service import DialogueResponse, DialogueService, DialogueStreamEvent
 from .persistent_agent import PersistentHeartbeatResult, PersistentLifeAgent
+from .runner import HeartbeatRunner, RunnerConfig
+from .planning import PlanningDecision, PlanningProposal, PlanningService
 
 __all__ = [
     "Activity",
@@ -49,6 +53,14 @@ __all__ = [
     "LifeRuntime",
     "PersistentLifeAgent",
     "PersistentHeartbeatResult",
+    "DialogueResponse",
+    "DialogueService",
+    "DialogueStreamEvent",
+    "HeartbeatRunner",
+    "PlanningDecision",
+    "PlanningProposal",
+    "PlanningService",
+    "RunnerConfig",
     "RawDialogueStore",
     "RawMemory",
     "RawPointer",
@@ -66,7 +78,12 @@ __all__ = [
     "ContextBundle",
     "ContextConfig",
     "LLMProvider",
+    "LLMResult",
+    "DEFAULT_DEEPSEEK_MODEL",
+    "DeepSeekProvider",
     "MockLLMProvider",
+    "OllamaProvider",
+    "default_provider",
     "RandomEventEngine",
     "RandomEventSpec",
     "RawTimeline",

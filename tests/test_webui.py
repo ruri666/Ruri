@@ -8,7 +8,7 @@ from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
-from artificial_life import PersistentLifeAgent, TestClock
+from artificial_life import MockLLMProvider, PersistentLifeAgent, TestClock
 from artificial_life.webui import WebUIConfig, create_server
 
 
@@ -36,7 +36,7 @@ def call(base_url: str, path: str, *, method: str = "GET", body: dict | None = N
 
 
 def test_webui_serves_state_dialogue_and_heartbeat(tmp_path: Path):
-    agent = PersistentLifeAgent.initialize(tmp_path / "agent", clock=TestClock(instant(8)))
+    agent = PersistentLifeAgent.initialize(tmp_path / "agent", clock=TestClock(instant(8)), provider=MockLLMProvider())
     server = create_server(agent, WebUIConfig(port=0))
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -45,7 +45,7 @@ def test_webui_serves_state_dialogue_and_heartbeat(tmp_path: Path):
         status, health = call(base_url, "/api/health")
         assert status == 200
         assert health["ok"] is True
-        assert health["persona"] == "轻小说作家"
+        assert health["persona"] == ""
 
         status, page = call(base_url, "/api/state")
         assert status == 200
@@ -81,7 +81,7 @@ def test_webui_serves_state_dialogue_and_heartbeat(tmp_path: Path):
 
 
 def test_webui_rejects_invalid_message(tmp_path: Path):
-    agent = PersistentLifeAgent.initialize(tmp_path / "agent", clock=TestClock(instant(8)))
+    agent = PersistentLifeAgent.initialize(tmp_path / "agent", clock=TestClock(instant(8)), provider=MockLLMProvider())
     server = create_server(agent, WebUIConfig(port=0))
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -90,6 +90,38 @@ def test_webui_rejects_invalid_message(tmp_path: Path):
         status, payload = call(base_url, "/api/message", method="POST", body={"text": "   "})
         assert status == 400
         assert payload["error"] == "bad_request"
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+
+def test_webui_streams_dialogue_and_enter_sends(tmp_path: Path):
+    agent = PersistentLifeAgent.initialize(tmp_path / "agent", clock=TestClock(instant(8)), provider=MockLLMProvider())
+    server = create_server(agent, WebUIConfig(port=0))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base_url = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        request = Request(
+            base_url + "/api/message/stream",
+            method="POST",
+            data=json.dumps({"text": "流式测试", "conversation_id": "stream"}, ensure_ascii=False).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+        with urlopen(request, timeout=5) as response:
+            body = response.read().decode("utf-8")
+        assert response.status == 200
+        assert "event: start" in body
+        assert "event: delta" in body
+        assert "event: done" in body
+        assert "收到，我已记下：流式测试" in body
+
+        with urlopen(base_url + "/", timeout=5) as response:
+            page = response.read().decode("utf-8")
+        assert response.status == 200
+        assert "/api/message/stream" in page
+        assert "event.key==='Enter'&&!event.shiftKey" in page
     finally:
         server.shutdown()
         thread.join(timeout=5)

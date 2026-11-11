@@ -15,6 +15,7 @@ from .text_tree import TextTree, TextTreeStore, TreeNode
 
 
 ACTIVITY_STATUSES = {"planned", "active", "interrupted", "completed", "cancelled"}
+SEGMENT_STATUSES = {"active", "completed", "interrupted"}
 
 
 @dataclass
@@ -27,9 +28,13 @@ class ExecutionSegment:
     interruption_reason: str | None = None
 
     def __post_init__(self) -> None:
+        if self.status not in SEGMENT_STATUSES:
+            raise ValueError(f"invalid execution segment status: {self.status}")
         self.started_at = as_utc(self.started_at)
         if self.ended_at is not None:
             self.ended_at = as_utc(self.ended_at)
+            if self.ended_at < self.started_at:
+                raise ValueError("execution segment ended_at cannot precede started_at")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -79,6 +84,10 @@ class ActivityNode:
             value = getattr(self, field_name)
             if value is not None:
                 setattr(self, field_name, as_utc(value))
+        if self.planned_start_time and self.expected_end_time and self.expected_end_time <= self.planned_start_time:
+            raise ValueError("expected_end_time must be after planned_start_time")
+        if self.actual_start_time and self.actual_end_time and self.actual_end_time < self.actual_start_time:
+            raise ValueError("actual_end_time cannot precede actual_start_time")
 
     def to_tree_node(self) -> TreeNode:
         metadata = dict(self.metadata)
@@ -86,6 +95,8 @@ class ActivityNode:
             {
                 "goal": self.goal,
                 "execution_segments": [segment.to_dict() for segment in self.execution_segments],
+                "actual_start_time": iso(self.actual_start_time),
+                "actual_end_time": iso(self.actual_end_time),
             }
         )
         return TreeNode(
@@ -113,6 +124,8 @@ class ActivityNode:
             parent_activity=node.parent_id,
             planned_start_time=node.start_time,
             expected_end_time=node.end_time,
+            actual_start_time=metadata.pop("actual_start_time", None) or (segments[0].started_at if segments else None),
+            actual_end_time=metadata.pop("actual_end_time", None) or (segments[-1].ended_at if segments and node.status in {"completed", "cancelled"} else None),
             status=node.status,
             summary=node.summary,
             live_summary=node.live_summary,
@@ -153,6 +166,46 @@ class ActivityManager:
         self._save()
         return activity
 
+    def restore_projection(
+        self,
+        *,
+        activity_id: str,
+        name: str,
+        goal: str = "",
+        parent_activity: str | None = None,
+        planned_start_time: datetime | None = None,
+        expected_end_time: datetime | None = None,
+        actual_start_time: datetime | None = None,
+        actual_end_time: datetime | None = None,
+        status: str = "planned",
+        execution_segments: list[ExecutionSegment] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> ActivityNode:
+        """Restore a canonical node from an older derived projection.
+
+        This is intentionally not a lifecycle command: the old projection has
+        already emitted its Timeline facts, so migration must not append a
+        second ``activity.started`` event. New execution still goes through
+        ``create/start/interrupt/resume/complete``.
+        """
+
+        if activity_id in self.tree.nodes:
+            return self.get(activity_id)
+        activity = ActivityNode(
+            activity_id=activity_id,
+            name=name,
+            goal=goal,
+            parent_activity=parent_activity,
+            planned_start_time=planned_start_time,
+            expected_end_time=expected_end_time,
+            actual_start_time=actual_start_time,
+            actual_end_time=actual_end_time,
+            status=status,
+            execution_segments=list(execution_segments or []),
+            metadata=dict(metadata or {}),
+        )
+        return self._put(activity)
+
     def create(
         self,
         *,
@@ -168,8 +221,8 @@ class ActivityManager:
             raise ValueError(f"activity already exists: {activity_id}")
         if parent_activity is not None:
             parent = self.get(parent_activity)
-            if parent.status == "cancelled":
-                raise ValueError("cannot create a child under a cancelled activity")
+            if parent.status in {"completed", "cancelled"}:
+                raise ValueError("cannot create a child under a closed activity")
         activity = ActivityNode(
             activity_id=activity_id,
             name=name,
@@ -186,6 +239,9 @@ class ActivityManager:
         if activity.status not in {"planned", "interrupted"}:
             raise ValueError(f"cannot start activity in status {activity.status}")
         moment = as_utc(at or self.clock.now())
+        for other in self.all():
+            if other.status == "active" and other.activity_id != activity_id:
+                self.interrupt(other.activity_id, f"switch to {activity_id}", moment)
         activity.status = "active"
         activity.actual_start_time = activity.actual_start_time or moment
         segment_id = f"{activity.activity_id}:segment:{len(activity.execution_segments) + 1}"
@@ -291,6 +347,6 @@ class ActivityManager:
             activity_id=activity.activity_id,
         )
         if activity.raw_pointer is None:
-            activity.raw_pointer = RawPointer("agent", record.record_id, record.record_id)
+            activity.raw_pointer = RawPointer("agent", record.record_id, record.record_id, activity_id=activity.activity_id)
         else:
-            activity.raw_pointer = RawPointer("agent", activity.raw_pointer.start_record, record.record_id)
+            activity.raw_pointer = RawPointer("agent", activity.raw_pointer.start_record, record.record_id, activity_id=activity.activity_id)

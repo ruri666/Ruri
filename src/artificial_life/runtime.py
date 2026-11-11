@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterable
@@ -29,9 +29,9 @@ from .timers import TimerStore
 
 @dataclass(frozen=True)
 class RuntimeConfig:
-    heartbeat_interval: timedelta = timedelta(minutes=1)
+    heartbeat_interval: timedelta = timedelta(minutes=30)
     default_units_per_hour: float = 0.0
-    persona: str = "轻小说作家"
+    persona: str = ""
 
     def __post_init__(self) -> None:
         if self.heartbeat_interval.total_seconds() <= 0:
@@ -53,9 +53,9 @@ class RuntimeConfig:
         if version != SCHEMA_VERSION:
             raise ValueError(f"unsupported runtime config schema_version={version}")
         return cls(
-            heartbeat_interval=timedelta(seconds=int(data.get("heartbeat_interval_seconds", 60))),
+            heartbeat_interval=timedelta(seconds=int(data.get("heartbeat_interval_seconds", 1800))),
             default_units_per_hour=float(data.get("default_units_per_hour", 0.0)),
-            persona=str(data.get("persona", "轻小说作家")),
+            persona=str(data.get("persona", "")),
         )
 
 
@@ -110,6 +110,9 @@ class LifeRuntime:
             raise FileExistsError(f"agent already initialized: {root_path}")
         runtime_clock = clock or SystemClock()
         runtime_config = config or RuntimeConfig()
+        profile = read_json(root_path / "persona.json", {})
+        if profile:
+            runtime_config = replace(runtime_config, persona=profile["definition"])
         now = as_utc(runtime_clock.now())
         goal_tree = GoalTree(list(goals))
         schedule_plan = SchedulePlan(list(schedule))
@@ -199,18 +202,28 @@ class LifeRuntime:
                 activity = activities[payload["activity_id"]]
                 activity.progress_units = float(payload["total_units"])
                 activity.last_progress_at = event.occurred_at
-            elif event.event_type in ("activity.completed", "activity.paused", "activity.failed", "activity.cancelled") and payload.get("activity_id") in activities:
+            elif event.event_type in ("activity.completed", "activity.paused", "activity.interrupted", "activity.failed", "activity.cancelled") and payload.get("activity_id") in activities:
                 activity = activities[payload["activity_id"]]
                 activity.status = ActivityStatus(payload["status"])
                 activity.ended_at = event.occurred_at
                 state.active_activity_id = None
                 state.mode = StateMode.RESERVED_FREE
+            elif event.event_type == "activity.resumed" and payload.get("activity_id") in activities:
+                activity = activities[payload["activity_id"]]
+                activity.status = ActivityStatus.ACTIVE
+                activity.ended_at = None
+                activity.last_progress_at = event.occurred_at
+                state.active_activity_id = activity.id
+                state.mode = StateMode.WORKING
             elif event.event_type == "goal.progressed":
                 # Goal plan synchronization uses absolute totals, so recovery
                 # remains idempotent if the mutable plan file was stale.
                 pass
             elif event.event_type == "goal.completed":
                 state.completed_goal_ids.add(str(payload["goal_id"]))
+            elif event.event_type == "affect.updated":
+                for key in ("fatigue", "energy", "mood_valence", "emotion", "work_streak"):
+                    setattr(state, key, payload["after"][key])
             elif event.event_type == "state.transition":
                 state.mode = StateMode(payload["to"])
                 state.active_activity_id = payload.get("active_activity_id")
@@ -246,6 +259,135 @@ class LifeRuntime:
             {"schema_version": SCHEMA_VERSION, "activities": [item.to_dict() for item in self.activities.values()]},
         )
 
+    def configure_heartbeat_interval(self, interval: timedelta, *, at: datetime | None = None) -> None:
+        """Persist a new heartbeat cadence without rewriting timeline facts."""
+
+        updated = RuntimeConfig(
+            heartbeat_interval=interval,
+            default_units_per_hour=self.config.default_units_per_hour,
+            persona=self.config.persona,
+        )
+        now = as_utc(at or self.clock.now())
+        self.config = updated
+        atomic_write_json(self.config_path, updated.to_dict())
+        timers = self.timer_store.load()
+        timer = timers.get("heartbeat")
+        if timer is None:
+            self.timer_store.ensure_heartbeat(now + interval, interval)
+            return
+        if timer.interval_seconds == int(interval.total_seconds()):
+            # Loading with the same cadence must preserve an overdue timer.
+            # The runner will catch it up, rather than postponing recovery
+            # by another full interval on every process restart.
+            return
+        anchor = timer.last_fired_at or self.state.last_heartbeat_at or self.state.logical_time
+        next_due = as_utc(anchor) + interval
+        if next_due <= now:
+            next_due = now + interval
+        timer.interval_seconds = int(interval.total_seconds())
+        timer.due_at = next_due
+        self.timer_store.save(timers)
+
+    def interrupt_activity(
+        self,
+        activity_id: str,
+        at: datetime | None = None,
+        *,
+        reason: str = "dialogue",
+    ) -> tuple[TimelineEvent, ...]:
+        """Pause a scheduled activity without changing its planned schedule.
+
+        This is a factual execution transition.  The ScheduleBlock remains
+        planned and can be resumed later from the checkpoint; no plan mutation
+        is performed here.
+        """
+
+        moment = as_utc(at or self.clock.now())
+        activity = self.activities.get(activity_id)
+        if activity is None or activity.status is not ActivityStatus.ACTIVE:
+            raise ValueError(f"scheduled activity is not active: {activity_id}")
+        hb_id = f"interrupt_{moment:%Y%m%dT%H%M%S}_{self.timeline.last_seq() + 1:012d}"
+        activity.status = ActivityStatus.PAUSED
+        activity.ended_at = moment
+        self.state.active_activity_id = None
+        self.state.mode = StateMode.RESERVED_FREE
+        specs = [
+            self._spec(
+                "activity.interrupted",
+                moment,
+                {
+                    "activity_id": activity.id,
+                    "goal_id": activity.goal_id,
+                    "schedule_id": activity.schedule_id,
+                    "activity_type": activity.activity_type,
+                    "status": ActivityStatus.PAUSED.value,
+                    "reason": reason,
+                },
+                hb_id,
+            ),
+            self._spec(
+                "state.transition",
+                moment,
+                {
+                    "from": StateMode.WORKING.value,
+                    "to": StateMode.RESERVED_FREE.value,
+                    "active_activity_id": None,
+                    "previous_activity_id": activity.id,
+                    "reason": reason,
+                },
+                hb_id,
+            ),
+        ]
+        events = tuple(self.timeline.append_batch(specs))
+        self.state.logical_time = max(self.state.logical_time, moment)
+        self._persist_projection()
+        return events
+
+    def resume_activity(self, activity_id: str, at: datetime | None = None) -> tuple[TimelineEvent, ...]:
+        """Resume a previously dialogue-paused scheduled activity."""
+
+        moment = as_utc(at or self.clock.now())
+        activity = self.activities.get(activity_id)
+        if activity is None or activity.status is not ActivityStatus.PAUSED:
+            raise ValueError(f"scheduled activity is not paused: {activity_id}")
+        if self.state.active_activity_id is not None:
+            raise ValueError("cannot resume while another scheduled activity is active")
+        hb_id = f"resume_{moment:%Y%m%dT%H%M%S}_{self.timeline.last_seq() + 1:012d}"
+        activity.status = ActivityStatus.ACTIVE
+        activity.ended_at = None
+        activity.last_progress_at = moment
+        self.state.active_activity_id = activity.id
+        self.state.mode = StateMode.WORKING
+        specs = [
+            self._spec(
+                "activity.resumed",
+                moment,
+                {
+                    "activity_id": activity.id,
+                    "goal_id": activity.goal_id,
+                    "schedule_id": activity.schedule_id,
+                    "activity_type": activity.activity_type,
+                    "status": ActivityStatus.ACTIVE.value,
+                },
+                hb_id,
+            ),
+            self._spec(
+                "state.transition",
+                moment,
+                {
+                    "from": StateMode.RESERVED_FREE.value,
+                    "to": StateMode.WORKING.value,
+                    "active_activity_id": activity.id,
+                    "reason": "dialogue_checkpoint_resume",
+                },
+                hb_id,
+            ),
+        ]
+        events = tuple(self.timeline.append_batch(specs))
+        self.state.logical_time = max(self.state.logical_time, moment)
+        self._persist_projection()
+        return events
+
     def _spec(
         self,
         event_type: str,
@@ -255,7 +397,13 @@ class LifeRuntime:
     ) -> dict[str, Any]:
         return {"event_type": event_type, "occurred_at": at, "payload": payload, "heartbeat_id": heartbeat_id}
 
-    def heartbeat(self, at: datetime | None = None, *, heartbeat_id: str | None = None) -> HeartbeatResult:
+    def heartbeat(
+        self,
+        at: datetime | None = None,
+        *,
+        heartbeat_id: str | None = None,
+        drive_schedule: bool = True,
+    ) -> HeartbeatResult:
         now = as_utc(at or self.clock.now())
         # A repeated heartbeat at the same logical instant is a no-op after the
         # first completed heartbeat, which makes retries safe.
@@ -283,7 +431,7 @@ class LifeRuntime:
         # external activity id here, but that id is intentionally absent from
         # ``self.activities``.  Treat that state as occupied so the schedule
         # driver does not start a second activity underneath it.
-        if active is None and self.state.active_activity_id is None:
+        if drive_schedule and active is None and self.state.active_activity_id is None:
             for block in self.schedule.due(now):
                 if block.id in self.state.consumed_schedule_ids or not self.goals.active(block.goal_id):
                     continue
@@ -330,7 +478,7 @@ class LifeRuntime:
                 started_this_heartbeat = True
                 break
 
-        if active is not None and active.status is ActivityStatus.ACTIVE and not started_this_heartbeat:
+        if drive_schedule and active is not None and active.status is ActivityStatus.ACTIVE and not started_this_heartbeat:
             block = self.schedule.get(active.schedule_id)
             work_until = min(now, block.end_at)
             last = active.last_progress_at or active.started_at

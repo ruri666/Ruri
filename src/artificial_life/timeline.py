@@ -101,34 +101,59 @@ class RawTimeline:
         self.root = root
         self.root.mkdir(parents=True, exist_ok=True)
         self._lock = RLock()
+        self._events: list[TimelineEvent] | None = None
+        self._cached_files_sig: tuple | None = None
 
     def _files(self) -> list[Path]:
         return sorted(self.root.rglob("*.jsonl"))
 
+    def _signature(self, files: list[Path]) -> tuple:
+        sig = []
+        for p in files:
+            try:
+                st = p.stat()
+                sig.append((str(p), st.st_mtime_ns, st.st_size))
+            except OSError:
+                sig.append((str(p), 0, 0))
+        return tuple(sig)
+
     def events(self) -> list[TimelineEvent]:
-        events: list[TimelineEvent] = []
-        for path in self._files():
-            with path.open("r", encoding="utf-8") as handle:
-                for line_number, line in enumerate(handle, 1):
-                    if not line.strip():
-                        continue
-                    try:
-                        event = TimelineEvent.from_dict(json.loads(line))
-                    except (ValueError, KeyError, json.JSONDecodeError) as exc:
-                        raise TimelineCorruption(f"invalid event in {path}:{line_number}: {exc}") from exc
-                    events.append(event)
-        events.sort(key=lambda event: event.seq)
-        for expected_seq, event in enumerate(events, 1):
-            if event.seq != expected_seq:
-                raise TimelineCorruption(f"timeline sequence gap: expected {expected_seq}, got {event.seq}")
-        return events
+        with self._lock:
+            files = self._files()
+            sig = self._signature(files)
+            if self._events is not None and self._cached_files_sig == sig:
+                return list(self._events)
+            events: list[TimelineEvent] = []
+            for path in files:
+                with path.open("r", encoding="utf-8") as handle:
+                    for line_number, line in enumerate(handle, 1):
+                        if not line.strip():
+                            continue
+                        try:
+                            event = TimelineEvent.from_dict(json.loads(line))
+                        except (ValueError, KeyError, json.JSONDecodeError) as exc:
+                            raise TimelineCorruption(f"invalid event in {path}:{line_number}: {exc}") from exc
+                        events.append(event)
+            events.sort(key=lambda event: event.seq)
+            for expected_seq, event in enumerate(events, 1):
+                if event.seq != expected_seq:
+                    raise TimelineCorruption(f"timeline sequence gap: expected {expected_seq}, got {event.seq}")
+            self._events = events
+            self._cached_files_sig = sig
+            return list(events)
 
     def scan(self, after_seq: int = 0) -> Iterator[TimelineEvent]:
         yield from (event for event in self.events() if event.seq > after_seq)
 
     def last_seq(self) -> int:
-        all_events = self.events()
-        return all_events[-1].seq if all_events else 0
+        with self._lock:
+            if self._events is not None:
+                files = self._files()
+                sig = self._signature(files)
+                if self._cached_files_sig == sig:
+                    return self._events[-1].seq if self._events else 0
+            all_events = self.events()
+            return all_events[-1].seq if all_events else 0
 
     def append(
         self,
@@ -184,6 +209,9 @@ class RawTimeline:
                     handles[path].write(json.dumps(event.to_dict(), ensure_ascii=False, sort_keys=True) + "\n")
                 for handle in handles.values():
                     handle.flush()
+                if self._events is not None:
+                    self._events.extend(events)
+                    self._cached_files_sig = self._signature(self._files())
                 return events
             finally:
                 for handle in handles.values():
