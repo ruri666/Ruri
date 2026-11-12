@@ -1,0 +1,6 @@
+{
+  "name": "desktop-preferences",
+  "version": "0.8.0",
+  "description": "Complete source and depth selection through collection, host-model preference synthesis and verified lifecycle memory persistence.",
+  "skills": "./skills/"
+}
